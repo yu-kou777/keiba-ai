@@ -9,8 +9,8 @@ import json
 # ==========================================
 # ⚙️ 設定：Discord Webhook URL
 # ==========================================
-# 👇 DiscordのURLはそのまま残してください
-DISCORD_WEBHOOK_URL = "https://discordapp.com/api/webhooks/1473026116825645210/9eR_UIp-YtDqgKem9q4cD9L2wXrqWZspPaDhTLB6HjRQyLZU-gaUCKvKbf2grX7msal3"
+# 👇 ここに必ずDiscordのURLを貼り付けてください！
+DISCORD_WEBHOOK_URL = "ここにDiscordのWebhook URLを貼り付けてください"
 
 PLACE_MAP = {
     "札幌": "01", "函館": "02", "福島": "03", "新潟": "04",
@@ -54,28 +54,17 @@ def get_data(race_id):
     res.encoding = 'EUC-JP'
     soup = BeautifulSoup(res.text, 'html.parser')
 
-    # レース名取得（強化版）
-    race_name = "レース名不明"
-    # 出馬表ページのタイトル
+    # レース名
     r_name_div = soup.find('div', class_='RaceName')
     if r_name_div:
         race_name = r_name_div.text.strip()
     else:
-        # 結果ページのタイトル(h1など)
-        h1_title = soup.find('h1', class_='RaceName')
-        if h1_title:
-            race_name = h1_title.text.strip()
-        else:
-            # ページタイトルから推測
-            title_tag = soup.find('title')
-            if title_tag:
-                race_name = title_tag.text.split('｜')[0]
+        h1 = soup.find('h1')
+        race_name = h1.text.strip() if h1 else "レース名不明"
 
-    # 馬データを抽出
     horses = []
     rows = soup.select('tr.HorseList')
-    if not rows:
-        rows = soup.select('table.RaceTable01 tr') # 結果ページ用
+    if not rows: rows = soup.select('table.RaceTable01 tr')
 
     for row in rows:
         try:
@@ -88,61 +77,95 @@ def get_data(race_id):
             name = name_tag.text.strip()
             
             # オッズ取得
-            odds = 99.9
-            # 人気タグがあればそこからオッズ推測（簡易）
-            pop_tag = row.select_one('span.Popular')
+            odds = 999.0
             odds_tag = row.select_one('td.Odds')
-            
             if odds_tag:
                 txt = odds_tag.text.strip()
                 if txt.replace('.','').isdigit():
                     odds = float(txt)
             
-            # ゆーこうロジック簡易版
+            # --- 🧠 ゆーこう式AIロジック (Lite Model) ---
             score = 0
-            if odds < 30: score += (100 / odds)
             
+            # 1. 支持率スコア (オッズが低いほど高い)
+            if odds > 0:
+                score += (100 / odds) * 1.5
+            
+            # 2. 騎手ボーナス (トップジョッキーは加点)
             jockey_tag = row.select_one('td.Jockey')
+            jockey = ""
             if jockey_tag:
                 jockey = jockey_tag.text.strip()
-                if any(x in jockey for x in ['ルメ', '川田', '武豊', '坂井', '戸崎', 'レーン']):
+                if any(x in jockey for x in ['ルメ', '川田', '武豊', '坂井', '戸崎', 'レーン', 'ムーア', 'モレイラ']):
                     score += 15
-            
-            horses.append({"馬番": umaban, "馬名": name, "オッズ": odds, "スコア": score})
+                elif any(x in jockey for x in ['松山', '横山武', '西村', '鮫島']):
+                    score += 8
+
+            # 3. 穴馬ボーナス (Gap理論簡易版)
+            # オッズが15倍〜50倍のゾーンにいる馬を少し底上げして「穴」として検知させる
+            if 15 <= odds <= 50:
+                score += 10 
+
+            horses.append({
+                "馬番": umaban, 
+                "馬名": name, 
+                "オッズ": odds, 
+                "騎手": jockey, 
+                "スコア": score
+            })
         except:
             continue
 
     if not horses: return None, race_name
     
-    # ランキング作成
+    # スコア順に並べ替え
     df = pd.DataFrame(horses)
-    df = df.sort_values('スコア', ascending=False)
-    return df.head(6).to_dict('records'), race_name
+    df = df.sort_values('スコア', ascending=False).reset_index(drop=True)
+    return df, race_name
 
-def send_discord(ranks, race_name, date_str, place, r_num):
+def make_recommendation(df):
+    """スコアに基づいて買い目を構築する"""
+    # 上位馬を抽出
+    top1 = df.iloc[0] # ◎
+    top2 = df.iloc[1] # 〇
+    top3 = df.iloc[2] # ▲
+    
+    # 穴候補（スコア4位〜6位）
+    holes = df.iloc[3:6]['馬番'].tolist()
+    hole_str = ", ".join(holes)
+
+    # 3連単フォーメーション構築
+    # パターン1: 本命ガチ (1着固定 -> 2,3着流し)
+    form1 = f"1着: {top1['馬番']}\n2着: {top2['馬番']}, {top3['馬番']}\n3着: {top2['馬番']}, {top3['馬番']}, {hole_str}"
+    
+    # パターン2: 本命・対抗折り返し (1,2着マルチ -> 3着穴)
+    form2 = f"1,2着: {top1['馬番']} ⇔ {top2['馬番']}\n3着: {top3['馬番']}, {hole_str}"
+
+    return top1, top2, top3, hole_str, form1, form2
+
+def send_discord(df, race_name, date_str, place, r_num):
     if "http" not in DISCORD_WEBHOOK_URL:
         print("⚠️ Discord URL未設定")
         return
 
-    honmei = ranks[0]
-    taikou = ranks[1]
-    tana = ranks[2]
+    top1, top2, top3, hole_str, form1, form2 = make_recommendation(df)
     
-    # オッズが99.9（取得失敗）の場合は表示を変える
-    odds_str = f"{honmei['オッズ']}" if honmei['オッズ'] != 99.9 else "取得不可(終了レース)"
+    odds_disp = top1['オッズ'] if top1['オッズ'] != 999.0 else "取得前"
 
     msg = {
-        "username": "ゆーこうAI 🏇",
+        "username": "ゆーこうAI (Lite Model)",
         "embeds": [{
-            "title": f"🎯 AI予想: {place}{r_num}R {race_name}",
-            "description": f"📅 {date_str} | 簡易ロジック解析",
-            "color": 16776960,
+            "title": f"🏇 {place}{r_num}R {race_name}",
+            "description": f"📅 {date_str} | AI解析結果",
+            "color": 5763719, # Green
             "fields": [
-                {"name": "◎ 本命", "value": f"**{honmei['馬番']} {honmei['馬名']}**\n(オッズ: {odds_str})", "inline": True},
-                {"name": "〇 対抗", "value": f"**{taikou['馬番']} {taikou['馬名']}**", "inline": True},
-                {"name": "▲ 単穴", "value": f"**{tana['馬番']} {tana['馬名']}**", "inline": True},
-                {"name": "推奨買い目 (3連単F)", "value": f"1着: {honmei['馬番']}\n2着: {taikou['馬番']}, {tana['馬番']}\n3着: 流し ({ranks[3]['馬番']}...)", "inline": False}
-            ]
+                {"name": "🥇 ◎ 本命 (信頼度S)", "value": f"**{top1['馬番']} {top1['馬名']}**\n({top1['騎手']} / {odds_disp}倍)", "inline": False},
+                {"name": "🥈 〇 対抗", "value": f"**{top2['馬番']} {top2['馬名']}**", "inline": True},
+                {"name": "🥉 ▲ 単穴", "value": f"**{top3['馬番']} {top3['馬名']}**", "inline": True},
+                {"name": "🔥 激走警戒 (Gap馬)", "value": f"{hole_str}", "inline": False},
+                {"name": "🎯 推奨買い目 (3連単)", "value": f"**【本命堅実】**\n{form1}\n\n**【折り返し】**\n{form2}", "inline": False}
+            ],
+            "footer": {"text": "Developed by Yuuki & Hybrid-AI"}
         }]
     }
     requests.post(DISCORD_WEBHOOK_URL, json=msg)
@@ -151,16 +174,16 @@ if __name__ == "__main__":
     if len(sys.argv) > 3:
         d, p, r = sys.argv[1], sys.argv[2], sys.argv[3]
     else:
-        d, p, r = "20260214", "東京", "11"
+        d, p, r = "20260222", "東京", "11" # デフォルト
 
-    print(f"🚀 {d} {p} {r}R 解析開始")
+    print(f"🚀 解析開始: {d} {p} {r}R")
     rid = find_race_id(d, p, r)
     if rid:
-        data, name = get_data(rid)
-        if data:
-            send_discord(data, name, d, p, r)
-            print("✅ 完了")
+        df, name = get_data(rid)
+        if df is not None:
+            send_discord(df, name, d, p, r)
+            print("✅ 予想を送信しました")
         else:
-            print("❌ データなし")
+            print("❌ データ抽出失敗")
     else:
-        print("❌ ID特定失敗")
+        print("❌ レースIDが見つかりませんでした")
