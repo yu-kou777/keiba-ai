@@ -10,7 +10,7 @@ import json
 # ⚙️ 設定：Discord Webhook URL
 # ==========================================
 # 👇 ここに必ずDiscordのURLを貼り付けてください！
-DISCORD_WEBHOOK_URL = "ここにDiscordのWebhook URLを貼り付けてください"
+DISCORD_WEBHOOK_URL = "https://discordapp.com/api/webhooks/1473026116825645210/9eR_UIp-YtDqgKem9q4cD9L2wXrqWZspPaDhTLB6HjRQyLZU-gaUCKvKbf2grX7msal3"
 
 # 会場コード
 PLACE_MAP = {
