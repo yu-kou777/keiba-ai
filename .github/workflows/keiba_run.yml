@@ -1,0 +1,31 @@
+name: Keiba Prediction
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_date:
+        description: '日付 (例: 20260214)'
+        required: true
+        default: '20260214'
+      place:
+        description: '場所 (例: 東京)'
+        required: true
+        default: '東京'
+      race_num:
+        description: 'レース番号'
+        required: true
+        default: '11'
+
+jobs:
+  run-keiba:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Set up Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run Bot
+        run: python keiba_bot.py ${{ github.event.inputs.target_date }} ${{ github.event.inputs.place }} ${{ github.event.inputs.race_num }}
