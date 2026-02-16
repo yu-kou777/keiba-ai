@@ -7,7 +7,7 @@ import re
 import json
 
 # ==========================================
-# ⚙️ 設定：Discord Webhook URL (埋め込み済み)
+# ⚙️ 設定：Discord Webhook URL
 # ==========================================
 DISCORD_WEBHOOK_URL = "https://discordapp.com/api/webhooks/1473026116825645210/9eR_UIp-YtDqgKem9q4cD9L2wXrqWZspPaDhTLB6HjRQyLZU-gaUCKvKbf2grX7msal3"
 
@@ -161,9 +161,7 @@ def make_recommendation(df):
     hole_str = ", ".join(map(str, hole_nums))
 
     # 3連単フォーメーション構築
-    # パターン1: 本命ガチ (1着固定 -> 2,3着: 対抗・単穴・穴)
-    # 2着候補: 〇, ▲
-    # 3着候補: 〇, ▲, 穴馬たち
+    # パターン1: 本命ガチ
     himo_list = f"{top2['馬番']}, {top3['馬番']}"
     if hole_str: himo_list += f", {hole_str}"
     
@@ -176,4 +174,46 @@ def make_recommendation(df):
 
 def send_discord(df, race_name, date_str, place, r_num):
     rec = make_recommendation(df)
-    if not
+    if not rec:
+        print("❌ データ不足で予想できません")
+        return
+        
+    top1, top2, top3, hole_str, form1, form2 = rec
+    
+    odds_disp = top1['オッズ'] if top1['オッズ'] != 999.0 else "取得前"
+
+    msg = {
+        "username": "ゆーこうAI (Lite Model)",
+        "embeds": [{
+            "title": f"🏇 {place}{r_num}R {race_name}",
+            "description": f"📅 {date_str} | AI解析結果",
+            "color": 5763719, # Green
+            "fields": [
+                {"name": "🥇 ◎ 本命 (信頼度S)", "value": f"**{top1['馬番']} {top1['馬名']}**\n({top1['騎手']} / {odds_disp}倍)", "inline": False},
+                {"name": "🥈 〇 対抗", "value": f"**{top2['馬番']} {top2['馬名']}**", "inline": True},
+                {"name": "🥉 ▲ 単穴", "value": f"**{top3['馬番']} {top3['馬名']}**", "inline": True},
+                {"name": "🔥 激走警戒 (Gap馬)", "value": f"{hole_str}", "inline": False},
+                {"name": "🎯 推奨買い目 (3連単)", "value": f"**【本命堅実】**\n{form1}\n\n**【折り返し】**\n{form2}", "inline": False}
+            ],
+            "footer": {"text": "Developed by Yuuki & Hybrid-AI"}
+        }]
+    }
+    requests.post(DISCORD_WEBHOOK_URL, json=msg)
+
+if __name__ == "__main__":
+    if len(sys.argv) > 3:
+        d, p, r = sys.argv[1], sys.argv[2], sys.argv[3]
+    else:
+        d, p, r = "20260222", "東京", "11" # デフォルト
+
+    print(f"🚀 解析開始: {d} {p} {r}R")
+    rid = find_race_id(d, p, r)
+    if rid:
+        df, name = get_data(rid)
+        if df is not None:
+            send_discord(df, name, d, p, r)
+            print("✅ 予想を送信しました")
+        else:
+            print("❌ データ抽出失敗")
+    else:
+        print("❌ レースIDが見つかりませんでした")
