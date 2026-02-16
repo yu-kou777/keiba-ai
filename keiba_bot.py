@@ -41,7 +41,6 @@ def find_race_id(date_str, place_name, race_num):
                 res = requests.get(url, headers=headers, timeout=5)
                 res.encoding = 'EUC-JP'
                 html = res.text
-                # 日付が一致し、かつ出馬表か結果ページならOK
                 if target_date_text in html and ("出馬表" in html or "レース結果" in html):
                     print(f"✅ 発見: {race_id}")
                     return race_id
@@ -50,7 +49,7 @@ def find_race_id(date_str, place_name, race_num):
     return None
 
 def get_data(race_id):
-    """レースデータを取得・解析（重複防止付き）"""
+    """レースデータを取得・解析（重複防止強化版）"""
     url = f"https://race.netkeiba.com/race/shutuba.html?race_id={race_id}"
     headers = {"User-Agent": "Mozilla/5.0"}
     res = requests.get(url, headers=headers)
@@ -68,65 +67,81 @@ def get_data(race_id):
     horses = []
     seen_umaban = set() # 🛑 重複チェック用
 
-    # 行データを取得（出馬表または結果テーブル）
-    rows = soup.select('tr.HorseList')
-    if not rows: rows = soup.select('table.RaceTable01 tr')
+    # --- モード判定: 出馬表か、結果ページか ---
+    # 出馬表テーブルを探す
+    shutuba_rows = soup.select('tr.HorseList')
+    
+    if shutuba_rows:
+        # 【Aパターン】未来のレース（出馬表）
+        target_rows = shutuba_rows
+        mode = "shutuba"
+    else:
+        # 【Bパターン】過去のレース（結果ページ）
+        # 結果テーブル(RaceTable01)のみを厳密に指定
+        target_rows = soup.select('table.RaceTable01 tr')
+        mode = "result"
 
-    for row in rows:
+    for row in target_rows:
         try:
-            # 馬番取得
-            umaban_tag = row.select_one('td.Umaban') or row.select_one('td:nth-of-type(1)')
-            if not umaban_tag: 
-                # 結果ページなどは列位置が違う場合があるため補正
-                tds = row.select('td')
-                if len(tds) > 3: umaban_tag = tds[2] # 多くの場合3列目
-            
-            if not umaban_tag: continue
-            
-            # 数字のみ抽出
-            umaban_text = umaban_tag.text.strip()
-            umaban = re.sub(r'\D', '', umaban_text)
-            
-            # 空文字や既に登録済みの馬番ならスキップ（これが重複を防ぎます）
-            if not umaban or umaban in seen_umaban: continue
-            
-            # 馬名取得
-            name_tag = row.select_one('span.HorseName') or row.select_one('a[href*="horse"]')
-            if not name_tag: continue
-            name = name_tag.text.strip()
-
-            # 重複リストに登録
-            seen_umaban.add(umaban)
-            
-            # オッズ取得
+            umaban = None
+            name = None
             odds = 999.0
-            odds_tag = row.select_one('td.Odds')
-            # 人気順タグがある場合はそこから推測せず、オッズタグを探す
-            if odds_tag:
-                txt = odds_tag.text.strip()
-                if re.match(r'^\d+(\.\d+)?$', txt):
-                    odds = float(txt)
+            jockey = ""
+
+            if mode == "shutuba":
+                # 出馬表モードのデータ取得
+                u_tag = row.select_one('td.Umaban')
+                if u_tag: umaban = u_tag.text.strip()
+                
+                n_tag = row.select_one('span.HorseName')
+                if n_tag: name = n_tag.text.strip()
+                
+                o_tag = row.select_one('td.Odds')
+                if o_tag:
+                    txt = o_tag.text.strip()
+                    if re.match(r'^\d+(\.\d+)?$', txt): odds = float(txt)
+                
+                j_tag = row.select_one('td.Jockey')
+                if j_tag: jockey = j_tag.text.strip()
+
+            elif mode == "result":
+                # 結果モードのデータ取得（列の位置が違うので注意）
+                tds = row.select('td')
+                if len(tds) < 5: continue # ヘッダー行などをスキップ
+                
+                # 結果ページの列: 0:着順, 1:枠, 2:馬番, 3:馬名...
+                umaban = tds[2].text.strip()
+                name = tds[3].text.strip().replace('\n', '')
+                
+                # 騎手は結果ページの特定列（通常6列目あたり）
+                if len(tds) > 6: jockey = tds[6].text.strip()
+                
+                # 結果ページには「単勝オッズ」がない場合が多いので人気順で代用しない（999とする）
+                # ただし、今回は「テスト」なので、着順をヒントにスコア付けしないように注意
+
+            # --- 共通チェック ---
+            # 馬番が数字でない、または既に登録済みの場合はスキップ
+            if not umaban or not umaban.isdigit(): continue
+            if umaban in seen_umaban: continue
             
+            # 登録
+            seen_umaban.add(umaban)
+
             # --- 🧠 ゆーこう式AIロジック (Lite Model) ---
             score = 0
             
-            # 1. 支持率スコア (オッズが低いほど高い)
-            if odds > 0:
+            # 1. 支持率スコア
+            if odds < 900: # オッズが取れている場合
                 score += (100 / odds) * 1.5
+            else:
+                # オッズがない（結果ページなど）場合、騎手だけで簡易スコア
+                score += 5 # 基礎点
             
             # 2. 騎手ボーナス
-            jockey_tag = row.select_one('td.Jockey')
-            jockey = "不明"
-            if jockey_tag:
-                jockey = jockey_tag.text.strip()
-                if any(x in jockey for x in ['ルメ', '川田', '武豊', '坂井', '戸崎', 'レーン', 'ムーア', 'モレイラ']):
-                    score += 15
-                elif any(x in jockey for x in ['松山', '横山武', '西村', '鮫島']):
-                    score += 8
-
-            # 3. 穴馬ボーナス (Gap理論簡易版)
-            if 15 <= odds <= 50:
-                score += 10 
+            if any(x in jockey for x in ['ルメ', '川田', '武豊', '坂井', '戸崎', 'レーン', 'ムーア', 'モレイラ']):
+                score += 15
+            elif any(x in jockey for x in ['松山', '横山武', '西村', '鮫島', '岩田']):
+                score += 8
 
             horses.append({
                 "馬番": int(umaban), 
@@ -156,19 +171,25 @@ def make_recommendation(df):
     
     # 穴候補：上位3頭「以外」から抽出（重複防止）
     main_ids = [top1['馬番'], top2['馬番'], top3['馬番']]
-    holes = df[~df['馬番'].isin(main_ids)].head(3)
+    # 上位3頭以外データを抽出
+    others = df[~df['馬番'].isin(main_ids)]
+    
+    holes = others.head(3)
     hole_nums = holes['馬番'].tolist()
     hole_str = ", ".join(map(str, hole_nums))
 
-    # 3連単フォーメーション構築
-    # パターン1: 本命ガチ
-    himo_list = f"{top2['馬番']}, {top3['馬番']}"
-    if hole_str: himo_list += f", {hole_str}"
+    # ヒモ候補リスト（対抗・単穴・穴馬）
+    himo_list_nums = [top2['馬番'], top3['馬番']] + hole_nums
+    himo_str = ", ".join(map(str, himo_list_nums))
     
-    form1 = f"1着: {top1['馬番']}\n2着: {top2['馬番']}, {top3['馬番']}\n3着: {himo_list}"
+    # 3連単フォーメーション構築
+    # パターン1: 本命ガチ (1着固定 -> 2,3着流し)
+    form1 = f"1着: {top1['馬番']}\n2着: {top2['馬番']}, {top3['馬番']}\n3着: {himo_str}"
     
     # パターン2: 本命・対抗折り返し
-    form2 = f"1,2着: {top1['馬番']} ⇔ {top2['馬番']}\n3着: {top3['馬番']}{', ' + hole_str if hole_str else ''}"
+    # 穴馬がいる場合のみ追加
+    hole_part = f", {hole_str}" if hole_str else ""
+    form2 = f"1,2着: {top1['馬番']} ⇔ {top2['馬番']}\n3着: {top3['馬番']}{hole_part}"
 
     return top1, top2, top3, hole_str, form1, form2
 
@@ -180,7 +201,7 @@ def send_discord(df, race_name, date_str, place, r_num):
         
     top1, top2, top3, hole_str, form1, form2 = rec
     
-    odds_disp = top1['オッズ'] if top1['オッズ'] != 999.0 else "取得前"
+    odds_disp = top1['オッズ'] if top1['オッズ'] < 900 else "取得前"
 
     msg = {
         "username": "ゆーこうAI (Lite Model)",
