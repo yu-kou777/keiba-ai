@@ -27,11 +27,13 @@ def get_time_diff_score(horse_url):
                 if match: diffs.append(float(match.group(1)))
         
         if not diffs: return 0
-        weights = [1.0, 0.8, 0.5]
+        # テクニカル分析：直近のタイム差を重視
+        weights = [1.0, 0.7, 0.4]
         score = 0
         for i, d in enumerate(diffs):
-            val = max(0, 1.2 - d) # タイム差1.2秒以内を評価
-            score += (val * 15) * weights[i]
+            # 1.0秒以内なら評価対象
+            val = max(0, 1.0 - d) 
+            score += (val * 20) * weights[i]
         return score
     except: return 0
 
@@ -42,7 +44,7 @@ def get_lab_data(date_str, place_name, race_num):
     headers = {"User-Agent": "Mozilla/5.0"}
     
     try:
-        print(f"🚀 【特大配当狙い】テクニカル・穴馬スキャン開始...")
+        print(f"🚀 【精度向上】テクニカル・タイム差スキャン開始...")
         res = requests.get(base_url, headers=headers, timeout=10)
         res.encoding = 'utf-8'
         soup = BeautifulSoup(res.text, 'html.parser')
@@ -76,25 +78,24 @@ def get_lab_data(date_str, place_name, race_num):
                 o_match = re.search(r'(\d{1,4}\.\d{1})', row.text)
                 if o_match: odds = float(o_match.group(1))
 
-                # 1. タイム差スコア (過去3走)
+                # タイム差スコア
                 time_score = get_time_diff_score(horse_url)
 
-                # 2. 期待値（穴馬）ボーナス 
-                # 「タイム差が良いのに人気がない馬」に爆発的な加点
-                under_value_bonus = 0
-                if odds > 20.0 and time_score > 10:
-                    under_value_bonus = time_score * 0.8 # 穴馬への偏重
+                # 💡 期待値（穴馬）加点：オッズが高く、タイム差が良い馬を優遇
+                ana_bonus = 0
+                if odds >= 15.0 and time_score > 5:
+                    ana_bonus = time_score * 0.5
 
-                # 3. 騎手補正
+                # 騎手補正
                 j_bonus = 15 if any(x in jockey for x in ['ルメ', '川田', '武豊', '坂井', '戸崎', '岩田', '鮫島']) else 0
                 
-                total_score = time_score + under_value_bonus + j_bonus
+                total_score = time_score + ana_bonus + j_bonus
                 
                 horses.append({
                     "num": int(umaban), "name": name, "jockey": jockey, 
-                    "odds": odds, "score": total_score, "is_ana": (odds > 20.0)
+                    "odds": odds, "score": total_score, "is_ana": (odds >= 15.0)
                 })
-                print(f"  🔍 {umaban}番 {name}: 判定終了")
+                print(f"  🔍 {umaban}番 {name}: 分析完了")
             except: continue
             
         return horses, title
@@ -102,33 +103,39 @@ def get_lab_data(date_str, place_name, race_num):
         print(f"❌ エラー: {e}"); return [], "エラー"
 
 def send_discord(horses, title, d, p, r):
-    if len(horses) < 5: return
+    if len(horses) < 5:
+        print("⚠️ 抽出馬が少なすぎるため送信をスキップしました。"); return
+    
     df = pd.DataFrame(horses).sort_values('score', ascending=False).reset_index(drop=True)
     
-    # 頭2軸（上位2頭）
-    top2 = df.head(2)
-    axis = top2['num'].tolist()
-    
-    # 相手候補（3〜7位）
-    opponents = df.iloc[2:8]['num'].tolist()
+    # 👑 頭2軸（上位2頭）
+    axis = df.head(2)['num'].tolist()
+    # 🐎 相手（3位〜7位）
+    opponents = df.iloc[2:7]['num'].tolist()
+    # 穴馬フラグ（オッズ15倍以上でスコア上位）
+    ana_list = [str(h['num']) for _, h in df.iterrows() if h['is_ana'] and h['num'] in (axis + opponents)]
+    ana_str = ", ".join(ana_list) if ana_list else "特になし"
     
     payload = {
-        "username": "ゆーこうAI (100万馬券狙い) 🏇",
+        "username": "ゆーこうAI (テクニカル2軸) 🏇",
         "embeds": [{
             "title": f"🎯 {p}{r}R {title}",
-            "description": f"📅 {d} | **【3連単 1着2頭軸フォーメーション】**",
-            "color": 15158332, # Red
+            "description": f"📅 {d} | **【3連単 頭2軸フォーメーション】**",
+            "color": 15548997, # Red/Pink
             "fields": [
-                {"name": "👑 1着軸 (2頭)", "value": f"**{axis[0]}番** ({df.iloc[0]['name']})\n**{axis[1]}番** ({df.iloc[1]['name']})", "inline": False},
-                {"name": "🐎 相手 (紐)", "value": f"{', '.join(map(str, opponents))}", "inline": False},
-                {"name": "💰 推奨買い目: 3連単(2軸)", "value": f"**1着**: {axis[0]}, {axis[1]}\n**2着**: {axis[0]}, {axis[1]}, {opponents[0]}, {opponents[1]}\n**3着**: 全て ({axis[0]}, {axis[1]}, {', '.join(map(str, opponents))})", "inline": False},
-                {"name": "⚠️ 穴馬フラグ", "value": f"今回検出された注目の穴馬: **{', '.join([str(h['num']) for h in horses if h['is_ana'] and h['score'] > 15])}**", "inline": False}
+                {"name": "👑 1着固定(2軸)", "value": f"**{axis[0]}番** ({df.iloc[0]['name']})\n**{axis[1]}番** ({df.iloc[1]['name']})", "inline": False},
+                {"name": "🐎 2・3着候補 (紐)", "value": f"{', '.join(map(str, opponents))}", "inline": False},
+                {"name": "💰 推奨買い目: 3連單", "value": f"**1着**: {axis[0]}, {axis[1]}\n**2着**: {axis[0]}, {axis[1]}, {opponents[0]}, {opponents[1]}\n**3着**: 全流し or 紐5頭", "inline": False},
+                {"name": "⚠️ 注目穴馬", "value": ana_str, "inline": False}
             ],
-            "footer": {"text": "アルデバランSの114万馬券を教訓に、タイム差重視の穴馬ロジックを強化しました。"}
+            "footer": {"text": "アルデバランSの114万馬券(7-15-1)を狙える広域ロジック"}
         }]
     }
-    requests.post(DISCORD_URL, json=payload)
-    print("✅ 2軸フォーメーションで送信完了。")
+    res = requests.post(DISCORD_URL, json=payload)
+    if res.status_code == 204:
+        print("✅ Discord通知を送信しました。")
+    else:
+        print(f"❌ Discord送信失敗 (Status: {res.status_code}): {res.text}")
 
 if __name__ == "__main__":
     args = sys.argv
