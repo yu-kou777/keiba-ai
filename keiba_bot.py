@@ -4,7 +4,7 @@ import pandas as pd
 import sys
 import re
 
-# --- 設定：Discord Webhook URL ---
+# --- 設定：Discord URL ---
 DISCORD_URL = "https://discordapp.com/api/webhooks/1473026116825645210/9eR_UIp-YtDqgKem9q4cD9L2wXrqWZspPaDhTLB6HjRQyLZU-gaUCKvKbf2grX7msal3"
 
 PLACE_MAP = {"東京":"05","中山":"06","京都":"08","阪神":"09","中京":"07","小倉":"10","新潟":"04","福島":"03","札幌":"01","函館":"02"}
@@ -35,65 +35,61 @@ def get_data(rid):
     res.encoding = 'EUC-JP'
     soup = BeautifulSoup(res.text, 'html.parser')
     
-    title = soup.find('title').text.split('｜')[0] if soup.find('title') else "競馬予想"
+    title = soup.find('title').text.split('｜')[0] if soup.find('title') else "予想結果"
     
-    # --- モード判定（ここを強化）---
-    shutuba_rows = soup.select('tr.HorseList')
-    result_rows = soup.select('table.RaceTable01 tr')
+    # 【改良点】特定のテーブルクラスに頼らず、すべての「行(tr)」を走査する
+    all_rows = soup.find_all('tr')
     
-    if shutuba_rows:
-        rows = shutuba_rows
-        mode = "shutuba"
-        print("ℹ️ 解析モード: 出馬表")
-    elif result_rows:
-        rows = result_rows
-        mode = "result"
-        print("ℹ️ 解析モード: レース結果")
-    else:
-        return [], title
-
     horses, seen = [], set()
-    for row in rows:
+    for row in all_rows:
         try:
-            tds = row.find_all('td')
-            # 結果ページはヘッダー行などが混じるので列数でガード
-            if len(tds) < 5: continue
+            # 馬名のリンクがある行だけをターゲットにする
+            name_tag = row.select_one('a[href*="/horse/"]')
+            if not name_tag: continue
             
-            # --- データ抽出 ---
-            if mode == "result":
-                # 結果ページ：3列目が馬番(tds[2])、4列目が馬名(tds[3])、7列目が騎手(tds[6])
-                umaban = tds[2].text.strip()
-                name = tds[3].text.strip().replace('\n', '')
-                jockey = tds[6].text.strip().replace('\n', '')
-            else:
-                # 出馬表：クラス名で指定
-                u_tag = row.select_one('td.Umaban')
-                umaban = u_tag.text.strip() if u_tag else ""
-                n_tag = row.select_one('span.HorseName')
-                name = n_tag.text.strip() if n_tag else ""
-                j_tag = row.select_one('td.Jockey')
-                jockey = j_tag.text.strip() if j_tag else ""
+            name = name_tag.text.strip()
+            if not name: continue
 
-            # クリーニング
-            umaban = re.sub(r'\D', '', umaban)
+            # 馬番を探す (行の中にある数字だけのセルを探す)
+            umaban = ""
+            tds = row.find_all('td')
+            for td in tds:
+                txt = td.text.strip()
+                # 1〜18の数字で、かつ「枠」の数字（色付きなど）と区別するため
+                # クラス名なども考慮したいが、単純に「最初の数字」が枠、次が馬番のケースが多い
+                # ここでは「td.Umaban」クラスがあればそれを、なければ「3番目のセル(結果ページ)」を採用
+                if "Umaban" in td.get("class", []):
+                    umaban = txt
+                    break
+            
+            # クラスで見つからなかった場合（結果ページなど）、位置で推定
+            if not umaban and len(tds) > 2:
+                # 結果ページは通常インデックス2が馬番
+                txt = tds[2].text.strip()
+                if txt.isdigit(): umaban = txt
+            
+            # まだなければ、行内の最初の「1桁か2桁の数字」を採用（最終手段）
+            if not umaban:
+                for td in tds:
+                    t = td.text.strip()
+                    if t.isdigit() and 1 <= int(t) <= 18:
+                        umaban = t
+                        break
+
             if not umaban or umaban in seen: continue
             seen.add(umaban)
 
-            # オッズ（数値のみ抽出）
+            # 騎手
+            jockey = "不明"
+            j_tag = row.select_one('a[href*="/jockey/"]')
+            if j_tag: jockey = j_tag.text.strip()
+
+            # オッズ（行全体から小数点を検索）
             odds = 999.0
-            # 行全体のテキストから小数点を検索
+            # 馬番や着順を誤検知しないよう、"xx.x" の形式を探す
             o_match = re.search(r'(\d{1,4}\.\d{1})', row.text)
             if o_match:
-                # 馬番や着順をオッズと間違えないよう、文脈など考慮したいが
-                # 簡易的に、値が小さすぎる(1.0未満)や大きすぎる(馬番?)を排除したいが
-                # ここでは見つかった小数を信じる（簡易ロジック）
-                pass 
-            
-            # 出馬表ならtd.Oddsがある
-            o_tag = row.select_one('td.Odds')
-            if o_tag:
-                otxt = o_tag.text.strip()
-                if re.match(r'^\d+(\.\d+)?$', otxt): odds = float(otxt)
+                odds = float(o_match.group(1))
 
             # スコア計算
             score = (100 / odds) * 1.5 if odds < 900 else 5
@@ -107,7 +103,7 @@ def get_data(rid):
 
 def send_discord(horses, title, d, p, r):
     if not horses:
-        print("❌ エラー: 馬データが0件でした")
+        print("❌ エラー: 馬が見つかりません（0件）")
         return
     
     df = pd.DataFrame(horses).sort_values('score', ascending=False).reset_index(drop=True)
@@ -117,6 +113,7 @@ def send_discord(horses, title, d, p, r):
     # 3連単フォーメーション
     himo = []
     if len(n) >= 5: himo = [n[1], n[2], n[3], n[4]]
+    else: himo = n[1:] # 馬が少ない場合
     
     payload = {
         "username": "ゆーこうAI 🏇",
@@ -144,6 +141,5 @@ if __name__ == "__main__":
         h, t = get_data(rid)
         print(f"📊 抽出馬数: {len(h)}頭")
         send_discord(h, t, d, p, r)
-        print("✅ 全工程完了")
     else:
         print("❌ レースが見つかりませんでした")
