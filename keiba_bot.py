@@ -11,41 +11,29 @@ DISCORD_URL = "https://discordapp.com/api/webhooks/1473026116825645210/9eR_UIp-Y
 LAB_PLACE_MAP = {"札幌":"01","函館":"02","福島":"03","新潟":"04","東京":"05","中山":"06","中京":"07","京都":"08","阪神":"09","小倉":"10"}
 
 def get_time_diff_score(horse_url):
-    """馬の個別ページから過去3走のタイム差を取得してスコア化する"""
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        # 1秒待機（マナー＆ブロック防止）
-        time.sleep(0.5)
+        time.sleep(0.4)
         res = requests.get("https://www.keibalab.jp" + horse_url, headers=headers, timeout=10)
         res.encoding = 'utf-8'
         soup = BeautifulSoup(res.text, 'html.parser')
-        
-        # 過去成績テーブルの「タイム差」列を探す
         rows = soup.select('table.db-horse-table tbody tr')
         diffs = []
         for row in rows[:3]: # 直近3走
             tds = row.find_all('td')
             if len(tds) > 13:
-                txt = tds[13].text.strip() # 競馬ラボの個別馬ページでは通常14列目がタイム差
-                # 「-0.1」や「0.5」などの数値を抽出
+                txt = tds[13].text.strip()
                 match = re.search(r'(-?\d+\.\d+)', txt)
-                if match:
-                    diffs.append(float(match.group(1)))
+                if match: diffs.append(float(match.group(1)))
         
         if not diffs: return 0
-        
-        # スコア計算：0.0秒（1着）に近いほど高得点。1.0秒以上離されると加点なし。
-        # 直近のレースほど重みを大きくする（テクニカル分析の移動平均的な考え方）
-        weights = [1.0, 0.7, 0.5]
-        total_time_score = 0
+        weights = [1.0, 0.8, 0.5]
+        score = 0
         for i, d in enumerate(diffs):
-            # 負の値（1着で後続を突き放した場合）はさらに評価
-            val = max(0, 1.5 - d) 
-            total_time_score += (val * 10) * weights[i]
-            
-        return total_time_score
-    except:
-        return 0
+            val = max(0, 1.2 - d) # タイム差1.2秒以内を評価
+            score += (val * 15) * weights[i]
+        return score
+    except: return 0
 
 def get_lab_data(date_str, place_name, race_num):
     p_code = LAB_PLACE_MAP.get(place_name, "05")
@@ -54,23 +42,20 @@ def get_lab_data(date_str, place_name, race_num):
     headers = {"User-Agent": "Mozilla/5.0"}
     
     try:
-        print(f"🚀 タイム差分析を開始します（これには少し時間がかかります）...")
+        print(f"🚀 【特大配当狙い】テクニカル・穴馬スキャン開始...")
         res = requests.get(base_url, headers=headers, timeout=10)
         res.encoding = 'utf-8'
         soup = BeautifulSoup(res.text, 'html.parser')
-        
-        title = soup.select_one('h1.raceTitle').text.strip().replace('\n', ' ') if soup.select_one('h1.raceTitle') else "解析中"
+        title = soup.select_one('h1.raceTitle').text.strip().replace('\n', ' ') if soup.select_one('h1.raceTitle') else "解析"
         
         horses, seen_num = [], set()
         rows = soup.find_all('tr')
         
-        # 抽出対象を絞り込んで巡回
         for row in rows:
             name_tag = row.select_one('a[href*="/db/horse/"]')
             if not name_tag: continue
-            
             tds = row.find_all('td')
-            if len(tds) < 4: continue
+            if len(tds) < 5: continue
             
             try:
                 name = name_tag.text.strip()
@@ -81,66 +66,74 @@ def get_lab_data(date_str, place_name, race_num):
                 name_td = name_tag.find_parent('td')
                 name_idx = td_list.index(name_td)
                 umaban = re.sub(r'\D', '', td_list[name_idx - 1].text.strip())
-                
                 if not umaban or umaban in seen_num: continue
                 seen_num.add(umaban)
 
                 jockey = row.select_one('a[href*="/db/jockey/"]').text.strip() if row.select_one('a[href*="/db/jockey/"]') else "不明"
                 
-                # 1. タイム差スコアの取得（過去3走）
-                print(f"  🔍 {umaban}番 {name} の過去3走を分析中...")
-                time_score = get_time_diff_score(horse_url)
-
-                # 2. オッズ期待値（サブ要素）
+                # オッズ
                 odds = 999.0
                 o_match = re.search(r'(\d{1,4}\.\d{1})', row.text)
                 if o_match: odds = float(o_match.group(1))
+
+                # 1. タイム差スコア (過去3走)
+                time_score = get_time_diff_score(horse_url)
+
+                # 2. 期待値（穴馬）ボーナス 
+                # 「タイム差が良いのに人気がない馬」に爆発的な加点
+                under_value_bonus = 0
+                if odds > 20.0 and time_score > 10:
+                    under_value_bonus = time_score * 0.8 # 穴馬への偏重
+
+                # 3. 騎手補正
+                j_bonus = 15 if any(x in jockey for x in ['ルメ', '川田', '武豊', '坂井', '戸崎', '岩田', '鮫島']) else 0
                 
-                # 3. 総合判定：タイム差スコアを主軸にする
-                # タイム差が良い ＋ 騎手が一流 ＝ 鉄板
-                total_score = time_score
-                if any(x in jockey for x in ['ルメ', '川田', '武豊', '坂井', '戸崎']): total_score += 15
+                total_score = time_score + under_value_bonus + j_bonus
                 
                 horses.append({
                     "num": int(umaban), "name": name, "jockey": jockey, 
-                    "odds": odds, "score": total_score, "time_val": time_score
+                    "odds": odds, "score": total_score, "is_ana": (odds > 20.0)
                 })
+                print(f"  🔍 {umaban}番 {name}: 判定終了")
             except: continue
             
         return horses, title
     except Exception as e:
-        print(f"❌ エラー: {e}")
-        return [], "エラー"
+        print(f"❌ エラー: {e}"); return [], "エラー"
 
 def send_discord(horses, title, d, p, r):
-    if len(horses) < 3: return
+    if len(horses) < 5: return
     df = pd.DataFrame(horses).sort_values('score', ascending=False).reset_index(drop=True)
-    top = df.head(6)
-    n = top['num'].tolist()
+    
+    # 頭2軸（上位2頭）
+    top2 = df.head(2)
+    axis = top2['num'].tolist()
+    
+    # 相手候補（3〜7位）
+    opponents = df.iloc[2:8]['num'].tolist()
     
     payload = {
-        "username": "ゆーこうAI (テクニカル分析) 🏇",
+        "username": "ゆーこうAI (100万馬券狙い) 🏇",
         "embeds": [{
             "title": f"🎯 {p}{r}R {title}",
-            "description": f"📅 {d} | 過去3走タイム差ベース解析",
-            "color": 15277667,
+            "description": f"📅 {d} | **【3連単 1着2頭軸フォーメーション】**",
+            "color": 15158332, # Red
             "fields": [
-                {"name": "🥇 ◎ 本命", "value": f"**{n[0]}番 {top.iloc[0]['name']}**\n(近3走の安定度が高い馬)", "inline": False},
-                {"name": "🥈 〇 対抗", "value": f"**{n[1]}番**", "inline": True},
-                {"name": "🥉 ▲ 単穴", "value": f"**{n[2]}番**", "inline": True},
-                {"name": "📈 解析の根拠", "value": f"1着とのタイム差が少ない馬を上位評価しました。\n本命馬のタイム評価点: {top.iloc[0]['time_val']:.1f}", "inline": False},
-                {"name": "💰 AI推奨", "value": f"3連複 軸1頭流し: {n[0]} - {n[1]}, {n[2]}, {n[3]}, {n[4]}", "inline": False}
-            ]
+                {"name": "👑 1着軸 (2頭)", "value": f"**{axis[0]}番** ({df.iloc[0]['name']})\n**{axis[1]}番** ({df.iloc[1]['name']})", "inline": False},
+                {"name": "🐎 相手 (紐)", "value": f"{', '.join(map(str, opponents))}", "inline": False},
+                {"name": "💰 推奨買い目: 3連単(2軸)", "value": f"**1着**: {axis[0]}, {axis[1]}\n**2着**: {axis[0]}, {axis[1]}, {opponents[0]}, {opponents[1]}\n**3着**: 全て ({axis[0]}, {axis[1]}, {', '.join(map(str, opponents))})", "inline": False},
+                {"name": "⚠️ 穴馬フラグ", "value": f"今回検出された注目の穴馬: **{', '.join([str(h['num']) for h in horses if h['is_ana'] and h['score'] > 15])}**", "inline": False}
+            ],
+            "footer": {"text": "アルデバランSの114万馬券を教訓に、タイム差重視の穴馬ロジックを強化しました。"}
         }]
     }
     requests.post(DISCORD_URL, json=payload)
-    print("✅ 全頭の過去3走チェック完了。Discordへ送信しました。")
+    print("✅ 2軸フォーメーションで送信完了。")
 
 if __name__ == "__main__":
     args = sys.argv
     date = args[1] if len(args) > 1 and args[1] != "" else "20260222"
     place = args[2] if len(args) > 2 and args[2] != "" else "東京"
     race = args[3] if len(args) > 3 else "11"
-    
     h, t = get_lab_data(date, place, race)
     send_discord(h, t, date, place, race)
