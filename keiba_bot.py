@@ -4,7 +4,7 @@ import pandas as pd
 import sys
 import re
 
-# --- 設定：Discord URL ---
+# --- 設定：Discord Webhook URL ---
 DISCORD_URL = "https://discordapp.com/api/webhooks/1473026116825645210/9eR_UIp-YtDqgKem9q4cD9L2wXrqWZspPaDhTLB6HjRQyLZU-gaUCKvKbf2grX7msal3"
 
 PLACE_MAP = {"東京":"05","中山":"06","京都":"08","阪神":"09","中京":"07","小倉":"10","新潟":"04","福島":"03","札幌":"01","函館":"02"}
@@ -36,62 +36,50 @@ def get_data(rid):
     soup = BeautifulSoup(res.text, 'html.parser')
     
     title = soup.find('title').text.split('｜')[0] if soup.find('title') else "予想結果"
-    
-    # 【改良点】特定のテーブルクラスに頼らず、すべての「行(tr)」を走査する
     all_rows = soup.find_all('tr')
     
     horses, seen = [], set()
     for row in all_rows:
         try:
-            # 馬名のリンクがある行だけをターゲットにする
-            name_tag = row.select_one('a[href*="/horse/"]')
-            if not name_tag: continue
-            
-            name = name_tag.text.strip()
-            if not name: continue
-
-            # 馬番を探す (行の中にある数字だけのセルを探す)
-            umaban = ""
+            # 1. まず「馬名」が入っているセル(td)を探す
             tds = row.find_all('td')
-            for td in tds:
-                txt = td.text.strip()
-                # 1〜18の数字で、かつ「枠」の数字（色付きなど）と区別するため
-                # クラス名なども考慮したいが、単純に「最初の数字」が枠、次が馬番のケースが多い
-                # ここでは「td.Umaban」クラスがあればそれを、なければ「3番目のセル(結果ページ)」を採用
-                if "Umaban" in td.get("class", []):
-                    umaban = txt
+            name_cell = None
+            name_idx = -1
+            
+            for i, td in enumerate(tds):
+                if td.select_one('a[href*="/horse/"]'):
+                    name_cell = td
+                    name_idx = i
                     break
             
-            # クラスで見つからなかった場合（結果ページなど）、位置で推定
-            if not umaban and len(tds) > 2:
-                # 結果ページは通常インデックス2が馬番
-                txt = tds[2].text.strip()
-                if txt.isdigit(): umaban = txt
+            if not name_cell or name_idx <= 0: continue
             
-            # まだなければ、行内の最初の「1桁か2桁の数字」を採用（最終手段）
+            name = name_cell.text.strip()
+            
+            # 2. 【ここが重要】馬名の「すぐ左隣」のセルを見る
+            # 結果表でも出馬表でも、必ず [枠] [馬番] [馬名] の並び順
+            umaban_td = tds[name_idx - 1]
+            umaban = re.sub(r'\D', '', umaban_td.text.strip())
+            
+            # もし左隣が空なら、念のため「Umaban」クラスを探す（保険）
             if not umaban:
-                for td in tds:
-                    t = td.text.strip()
-                    if t.isdigit() and 1 <= int(t) <= 18:
-                        umaban = t
-                        break
+                u_tag = row.select_one('td.Umaban')
+                if u_tag: umaban = re.sub(r'\D', '', u_tag.text.strip())
 
+            # それでもなければスキップ
             if not umaban or umaban in seen: continue
             seen.add(umaban)
 
-            # 騎手
+            # 3. 騎手とオッズ
             jockey = "不明"
             j_tag = row.select_one('a[href*="/jockey/"]')
             if j_tag: jockey = j_tag.text.strip()
 
-            # オッズ（行全体から小数点を検索）
             odds = 999.0
-            # 馬番や着順を誤検知しないよう、"xx.x" の形式を探す
             o_match = re.search(r'(\d{1,4}\.\d{1})', row.text)
-            if o_match:
-                odds = float(o_match.group(1))
+            if o_match: odds = float(o_match.group(1))
 
-            # スコア計算
+            # 4. スコア計算
             score = (100 / odds) * 1.5 if odds < 900 else 5
             if any(x in jockey for x in ['ルメ', '川田', '武豊', '坂井', '戸崎']): score += 15
             elif any(x in jockey for x in ['松山', '横山武', '西村']): score += 8
@@ -103,23 +91,20 @@ def get_data(rid):
 
 def send_discord(horses, title, d, p, r):
     if not horses:
-        print("❌ エラー: 馬が見つかりません（0件）")
-        return
+        print("❌ エラー: 馬が見つかりません"); return
     
     df = pd.DataFrame(horses).sort_values('score', ascending=False).reset_index(drop=True)
     top = df.head(6)
     n = top['num'].tolist()
     
     # 3連単フォーメーション
-    himo = []
-    if len(n) >= 5: himo = [n[1], n[2], n[3], n[4]]
-    else: himo = n[1:] # 馬が少ない場合
+    himo = n[1:5] if len(n) >= 5 else n[1:]
     
     payload = {
         "username": "ゆーこうAI 🏇",
         "embeds": [{
             "title": f"🎯 {p}{r}R {title}",
-            "description": f"📅 {d} | 解析完了",
+            "description": f"📅 {d} | 馬番修正済み",
             "color": 16753920,
             "fields": [
                 {"name": "🥇 ◎ 本命", "value": f"**{n[0]}番 {top.iloc[0]['name']}**\n({top.iloc[0]['jockey']})", "inline": False},
@@ -129,9 +114,7 @@ def send_discord(horses, title, d, p, r):
             ]
         }]
     }
-    res = requests.post(DISCORD_URL, json=payload)
-    if res.status_code in [200, 204]: print("✅ Discord通知成功！")
-    else: print(f"❌ Discord送信失敗: {res.status_code}")
+    requests.post(DISCORD_URL, json=payload)
 
 if __name__ == "__main__":
     a = sys.argv
@@ -141,5 +124,4 @@ if __name__ == "__main__":
         h, t = get_data(rid)
         print(f"📊 抽出馬数: {len(h)}頭")
         send_discord(h, t, d, p, r)
-    else:
-        print("❌ レースが見つかりませんでした")
+    else: print("❌ レースなし")
