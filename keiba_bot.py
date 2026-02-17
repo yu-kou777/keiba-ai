@@ -8,7 +8,6 @@ import sys
 import re
 import time
 import random
-import statistics
 
 # SSL警告無視
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -26,9 +25,7 @@ def get_stealth_headers():
     return {
         "User-Agent": random.choice(user_agents),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
         "Referer": "https://www.google.com/",
-        "Connection": "keep-alive",
         "Upgrade-Insecure-Requests": "1"
     }
 
@@ -39,31 +36,29 @@ def create_session():
     return session
 
 def safe_float(value):
-    try:
-        return float(re.sub(r'[^\d\.-]', '', str(value)))
+    try: return float(re.sub(r'[^\d\.-]', '', str(value)))
     except: return 99.9
 
-def analyze_potential_energy(session, horse_url, odds):
+def analyze_potential(session, horse_url, odds):
     """
-    【大穴・7番捕獲ロジック】
-    勝ち星よりも「惜敗（タイム差0.1-0.5）」を過大評価し、
-    潜在エネルギーの高い馬をスコア上位に押し上げる。
+    【教授の評価順位算出ロジック】
+    あなたのExcelデータの「評価順位」を再現するため、
+    タイム差の安定性と爆発力を数値化してランク付けする。
     """
     try:
         if not horse_url.startswith("http"): horse_url = "https://www.keibalab.jp" + horse_url
-        time.sleep(random.uniform(1.0, 2.0))
+        time.sleep(random.uniform(0.5, 1.0))
         
         res = session.get(horse_url, headers=get_stealth_headers(), timeout=20, verify=False)
         soup = BeautifulSoup(res.text, 'html.parser')
         rows = soup.select('table.db-horse-table tbody tr')
-        if not rows: return 0, False, "データなし"
+        if not rows: return 0, "データなし"
         
         diffs = []
-        for row in rows[:4]: # 直近4走を見る
+        for row in rows[:4]: # 直近4走
             tds = row.find_all('td')
             if len(tds) < 14: continue
             
-            # タイム差取得
             val = 99.9
             for td in tds:
                 txt = td.text.strip()
@@ -71,40 +66,45 @@ def analyze_potential_energy(session, horse_url, odds):
                     val = safe_float(txt)
                     break
             
-            # 見つからなければ着順から補完
+            # 着順補完
             if val == 99.9 and len(tds) > 11:
                 rank_txt = tds[11].text.strip()
                 if rank_txt.isdigit():
                     rank = int(rank_txt)
-                    if rank == 1: val = -0.1 # 勝ち
+                    if rank == 1: val = -0.1
                     elif rank <= 3: val = 0.2
-                    else: val = 1.0
+                    else: val = 0.8
 
             if val < 5.0: diffs.append(val)
 
-        if not diffs: return 0, False, "不明"
+        if not diffs: return 0, "不明"
         
-        # --- 教授の「惜敗係数」計算 ---
+        # --- スコア計算（評価順位の作成） ---
         score = 0
         
-        # 1. 「負けて強し」ボーナス (0.0秒〜0.5秒差負けを最大評価)
-        # 7番のような「勝てないが強い馬」を拾うための核心
-        regret_count = sum(1 for d in diffs if 0.0 <= d <= 0.5)
-        score += regret_count * 40 
-        
-        # 2. 安定度 (標準偏差的な考え)
+        # 1. 基礎能力（平均タイム差）
+        # 小さいほど良い。マイナス（圧勝）はさらに加点
         avg_diff = sum(diffs) / len(diffs)
-        if avg_diff < 0.6: score += 30
+        score += (1.5 - avg_diff) * 30 
         
-        # 3. 爆発トリガー (大穴フラグ)
-        # 「平均タイム差が良い」かつ「オッズが甘い(10倍以上)」
-        # 15番のような馬をここで検知
-        is_chaos = (avg_diff < 0.9 and odds > 10.0)
-        if is_chaos: score += 20 # 穴馬補正
+        # 2. 爆発力（0.2秒以内の好走経験）
+        # 1位や2位を取りきる力
+        sharpness = sum(1 for d in diffs if d <= 0.2)
+        score += sharpness * 15
+        
+        # 3. 安定感（0.9秒以内の大崩れしない力）
+        # 4頭BOXに入れるべき信頼性
+        stability = sum(1 for d in diffs if d <= 0.9)
+        score += stability * 5
 
-        return score, is_chaos, f"平均差:{avg_diff:.2f}"
+        # 4. オッズ補正（人気馬の信頼度担保）
+        # あなたのデータでは上位人気もしっかり評価されていたため
+        if odds < 5.0: score += 10
+        elif odds < 10.0: score += 5
+
+        return score, f"平均差:{avg_diff:.2f}"
         
-    except Exception: return 0, False, "エラー"
+    except Exception: return 0, "エラー"
 
 def get_race_data(date_str, place_name, race_num):
     if not date_str or len(date_str) < 8: date_str, place_name, race_num = "20260207", "京都", "11"
@@ -143,13 +143,13 @@ def get_race_data(date_str, place_name, race_num):
                 
                 jockey = row.select_one('a[href*="/db/jockey/"]').text.strip() if row.select_one('a[href*="/db/jockey/"]') else ""
 
-                score, is_chaos, note = analyze_potential_energy(session, name_tag.get('href'), odds)
+                score, note = analyze_potential(session, name_tag.get('href'), odds)
                 
-                # 騎手補正 (少し控えめに)
-                if any(x in jockey for x in ['ルメ', '川田', '武豊', '坂井']): score += 5
+                # 騎手補正
+                if any(x in jockey for x in ['ルメ', '川田', '武豊', '坂井', '戸崎']): score += 5
                 
-                print(f"  √ {umaban}番 {name}: {score} ({note})")
-                horses.append({"num": int(umaban), "name": name, "score": score, "is_ana": is_chaos})
+                print(f"  √ {umaban}番 {name}: 評価点 {score:.1f}")
+                horses.append({"num": int(umaban), "name": name, "score": score})
             except: continue
                 
         return horses, title
@@ -158,36 +158,36 @@ def get_race_data(date_str, place_name, race_num):
 
 def send_to_discord(horses, title, d, p, r):
     if not horses: return
+    # スコア順にソートして「評価順位」を決定
     df = pd.DataFrame(horses).sort_values('score', ascending=False).reset_index(drop=True)
     
-    # --- 教授の「3頭クエーサー」戦略 ---
-    # 1列目: スコア上位3頭（ここに7番を入れる！）
-    head_3 = df.head(3)['num'].tolist()
+    # 評価順位 1位～5位を取得
+    rank1 = df.iloc[0]
+    rank2 = df.iloc[1]
+    rank3 = df.iloc[2]
+    rank4 = df.iloc[3]
+    rank5 = df.iloc[4]
     
-    # 2列目: 上位3頭 + 穴フラグ持ち1頭
-    ana_list = df[df['is_ana']]['num'].tolist()
-    row2 = list(dict.fromkeys(head_3 + ana_list[:1])) # 重複除いて最大4頭
-    
-    # 3列目: 上位 + 穴 + 補欠
-    row3 = list(dict.fromkeys(head_3 + ana_list + df.iloc[3:7]['num'].tolist()))[:7]
+    # --- プラン1：基本の4頭BOX (24点) ---
+    box_members = [rank1['num'], rank2['num'], rank3['num'], rank4['num']]
+    box_str = f"**{', '.join(map(str, box_members))}**"
+    box_names = f"1位:{rank1['name']}, 2位:{rank2['name']}, 3位:{rank3['name']}, 4位:{rank4['name']}"
 
-    buy_str = (
-        f"**1着**: {', '.join(map(str, head_3))}\n"
-        f"**2着**: {', '.join(map(str, row2))}\n"
-        f"**3着**: {', '.join(map(str, row3))}"
-    )
+    # --- プラン2：勝負の1頭軸流し (12点) ---
+    axis = rank1['num']
+    opponents = [rank2['num'], rank3['num'], rank4['num'], rank5['num']]
+    form_str = f"**1着**: {axis}\n**2・3着**: {', '.join(map(str, opponents))}"
     
     payload = {
-        "username": "教授AI (3頭戦略モード) 🏇",
+        "username": "教授AI (黄金律プログラム) 🏇",
         "embeds": [{
             "title": f"🎯 {p}{r}R {title}",
-            "description": f"📅 {d} | **大穴捕獲・3頭頭フォーメーション**",
-            "color": 16711680, # Red
+            "description": f"📅 {d} | **少点数・高回収率モデル**",
+            "color": 16763904, # Gold
             "fields": [
-                {"name": "👑 1着候補 (3頭)", "value": f"**{', '.join(map(str, head_3))}**\n(7番のような惜敗組を格上げ)", "inline": False},
-                {"name": "🐎 2着・3着ゾーン", "value": f"**2着**: {', '.join(map(str, row2))}\n**3着**: {', '.join(map(str, row3))}", "inline": False},
-                {"name": "💰 推奨買い目", "value": buy_str, "inline": False},
-                {"name": "📈 教授の狙い", "value": "『勝ってはいないがタイム差が優秀』な馬を1列目に固定。15番などのカオス（穴馬）を2・3列目で網羅し、10万〜100万クラスの配当を狙い撃ちます。", "inline": False}
+                {"name": "📊 AI評価順位 (Top 5)", "value": f"1位: **{rank1['num']} {rank1['name']}**\n2位: **{rank2['num']} {rank2['name']}**\n3位: **{rank3['num']} {rank3['name']}**\n4位: **{rank4['num']} {rank4['name']}**\n5位: **{rank5['num']} {rank5['name']}**", "inline": False},
+                {"name": "🛡️ 【プラン1】基本戦略 (24点)", "value": f"買い目: **3連単 4頭BOX**\n選出馬: {box_str}\n理論: あなたのデータ解析で、シルクロードS(24万)と根岸S(16万)を的中させた黄金パターン。", "inline": False},
+                {"name": "⚔️ 【プラン2】勝負戦略 (12点)", "value": f"買い目: **3連単 1着固定流し**\n{form_str}\n理論: 評価1位の信頼度が高い場合の、コスト圧縮・利益最大化プラン。", "inline": False}
             ]
         }]
     }
