@@ -14,8 +14,8 @@ def find_race_id(d_str, p_name, r_num):
     m, d = int(d_str[4:6]), int(d_str[6:8])
     target = f"{m}月{d}日"
     print(f"🚀 {target} {p_name} {r_num}R を捜索中...")
-    for kai in range(1, 6):
-        for day in range(1, 10):
+    for kai in range(1, 7):
+        for day in range(1, 13):
             rid = f"{y}{p}{str(kai).zfill(2)}{str(day).zfill(2)}{r}"
             url = f"https://race.netkeiba.com/race/shutuba.html?race_id={rid}"
             try:
@@ -31,46 +31,48 @@ def get_data(rid):
     res.encoding = 'EUC-JP'
     soup = BeautifulSoup(res.text, 'html.parser')
     
-    title = soup.find('title').text.split('｜')[0] if soup.find('title') else "競馬予想"
+    title = soup.find('title').text.split('｜')[0] if soup.find('title') else "競馬解析"
     
-    # --- 🛠️ 過去ページ(RaceTable01)か出馬表(HorseList)かを自動判別 ---
-    is_result = "RaceTable01" in res.text
-    rows = soup.select('table.RaceTable01 tr') if is_result else soup.select('tr.HorseList')
+    # あらゆるテーブルの「行」を対象にスキャン
+    rows = soup.find_all('tr')
     
     horses, seen = [], set()
     for row in rows:
         try:
+            # 馬名(aタグ)がある行だけを抽出
+            name_tag = row.select_one('a[href*="/horse/"]')
+            if not name_tag: continue
+            name = name_tag.text.strip()
+            
             tds = row.find_all('td')
             if len(tds) < 5: continue
             
-            if is_result:
-                # 【過去結果ページ用スキャン】
-                umaban = tds[2].text.strip() # 3列目:馬番
-                name_tag = tds[3].select_one('a[href*="/horse/"]') # 4列目:馬名
-                jockey_tag = tds[6].select_one('a[href*="/jockey/"]') # 7列目:騎手
-                # オッズは13列目あたりにあるが、数値抽出で対応
-                odds_txt = tds[12].text.strip() if len(tds) > 12 else "999"
-            else:
-                # 【出馬表ページ用スキャン】
-                umaban = row.select_one('td.Umaban').text.strip() if row.select_one('td.Umaban') else ""
-                name_tag = row.select_one('span.HorseName')
-                jockey_tag = row.select_one('td.Jockey')
-                odds_tag = row.select_one('td.Odds')
-                odds_txt = odds_tag.text.strip() if odds_tag else "999"
-
-            if not umaban.isdigit() or not name_tag: continue
-            if umaban in seen: continue
+            # --- 🎯 過去/未来共通・馬番取得ロジック ---
+            # 列を端から見て、最初に見つかった「1〜20の純粋な数字」を馬番とする
+            umaban = None
+            for td in tds:
+                txt = td.text.strip()
+                if txt.isdigit() and 1 <= int(txt) <= 20:
+                    # 枠番(1-8)と混同しないよう、特定のクラスや並び順を優先
+                    if "Umaban" in td.get("class", []) or tds.index(td) > 1:
+                        umaban = txt
+                        break
+            
+            if not umaban or umaban in seen: continue
             seen.add(umaban)
 
-            name = name_tag.text.strip()
-            jockey = jockey_tag.text.strip() if jockey_tag else "不明"
-            
-            # オッズの数値化
+            # 騎手
+            jockey = "不明"
+            j_tag = row.select_one('a[href*="/jockey/"]')
+            if j_tag: jockey = j_tag.text.strip()
+
+            # オッズ（行全体から数値を検索）
             odds = 999.0
-            o_match = re.search(r'(\d+\.\d+)', odds_txt)
+            # 文字列の中から「数字.数字」の形式を探す
+            o_match = re.search(r'(\d+\.\d+)', row.text)
             if o_match: odds = float(o_match.group(1))
 
-            # 🧠 ゆーこう式スコア計算
+            # スコア計算
             score = (100 / odds) * 1.5 if odds < 900 else 5
             if any(x in jockey for x in ['ルメ', '川田', '武豊', '坂井', '戸崎']): score += 15
             elif any(x in jockey for x in ['松山', '横山武', '西村']): score += 8
@@ -82,7 +84,7 @@ def get_data(rid):
 
 def send_discord(horses, title, d, p, r):
     if len(horses) < 3:
-        print(f"❌ 抽出馬不足({len(horses)}頭)。解析をスキップします。")
+        print(f"⚠️ 抽出失敗: {len(horses)}頭。データが見つかりません。")
         return
     
     df = pd.DataFrame(horses).sort_values('score', ascending=False).reset_index(drop=True)
@@ -93,27 +95,27 @@ def send_discord(horses, title, d, p, r):
         "username": "ゆーこうAI予想 🏇",
         "embeds": [{
             "title": f"🎯 {p}{r}R {title}",
-            "description": f"📅 {d} | 過去データ検証モード",
-            "color": 3447003, # Blue
+            "description": f"📅 {d} | 過去検証モード",
+            "color": 3066993, # Cyan
             "fields": [
                 {"name": "🥇 ◎ 本命", "value": f"**{n[0]}番 {top.iloc[0]['name']}**\n(騎手: {top.iloc[0]['jockey']} / 当時オッズ: {top.iloc[0]['odds']})", "inline": False},
                 {"name": "🥈 〇 対抗", "value": f"**{n[1]}番**", "inline": True},
                 {"name": "🥉 ▲ 単穴", "value": f"**{n[2]}番**", "inline": True},
-                {"name": "💰 AI推奨買い目", "value": f"3連単 1着固定流し\n軸: {n[0]}\n相手: {n[1]}, {n[2]}, {n[3]}, {n[4]}", "inline": False}
+                {"name": "💰 検証ポイント", "value": f"このAIの本命が実際に掲示板(5着以内)に入っていたか確認してください。\n相手候補: {n[3]}, {n[4]}, {n[5]}", "inline": False}
             ],
-            "footer": {"text": "この予想と実際の結果を照らし合わせて精度を確認してください"}
+            "footer": {"text": "Developed by Yuuki & Hybrid-AI"}
         }]
     }
     requests.post(DISCORD_URL, json=payload)
 
 if __name__ == "__main__":
     a = sys.argv
-    d, p, r = (a[1], a[2], a[3]) if len(a) > 3 else ("20260215", "京都", "11") # デフォルトを京都記念に設定
-    rid = find_race_id(d, p, r)
+    date, place, race = (a[1], a[2], a[3]) if len(a) > 3 else ("20260222", "東京", "11")
+    rid = find_race_id(date, place, race)
     if rid:
         h, t = get_data(rid)
         print(f"📊 抽出馬数: {len(h)}頭")
-        send_discord(h, t, d, p, r)
-        print("✅ 検証用データの送信が完了しました")
+        send_discord(h, t, date, place, race)
+        print("✅ Discordへ送信しました")
     else:
-        print("❌ 指定されたレースが見つかりませんでした")
+        print("❌ レースが見つかりません")
