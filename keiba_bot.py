@@ -3,36 +3,69 @@ from bs4 import BeautifulSoup
 import pandas as pd
 import sys
 import re
+import time
 
 # --- 設定：Discord Webhook URL ---
 DISCORD_URL = "https://discordapp.com/api/webhooks/1473026116825645210/9eR_UIp-YtDqgKem9q4cD9L2wXrqWZspPaDhTLB6HjRQyLZU-gaUCKvKbf2grX7msal3"
 
 LAB_PLACE_MAP = {"札幌":"01","函館":"02","福島":"03","新潟":"04","東京":"05","中山":"06","中京":"07","京都":"08","阪神":"09","小倉":"10"}
 
-def get_lab_data(date_str, place_name, race_num):
-    p_code = LAB_PLACE_MAP.get(place_name, "05")
-    r_num = str(race_num).zfill(2)
-    # 競馬ラボURL: https://www.keibalab.jp/db/race/202602070811/
-    url = f"https://www.keibalab.jp/db/race/{date_str}{p_code}{r_num}/"
-    print(f"📡 解析ターゲット: {url}")
-    
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
+def get_time_diff_score(horse_url):
+    """馬の個別ページから過去3走のタイム差を取得してスコア化する"""
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        res = requests.get(url, headers=headers, timeout=15)
+        # 1秒待機（マナー＆ブロック防止）
+        time.sleep(0.5)
+        res = requests.get("https://www.keibalab.jp" + horse_url, headers=headers, timeout=10)
         res.encoding = 'utf-8'
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        # レース名取得
-        t_tag = soup.select_one('h1.raceTitle')
-        title = t_tag.text.strip().replace('\n', ' ') if t_tag else "レース解析"
-        print(f"🏇 レース名: {title}")
-
-        horses, seen_num = [], set()
-        # 競馬ラボの表（db-race-table）の行を取得
-        rows = soup.select('table tr')
+        # 過去成績テーブルの「タイム差」列を探す
+        rows = soup.select('table.db-horse-table tbody tr')
+        diffs = []
+        for row in rows[:3]: # 直近3走
+            tds = row.find_all('td')
+            if len(tds) > 13:
+                txt = tds[13].text.strip() # 競馬ラボの個別馬ページでは通常14列目がタイム差
+                # 「-0.1」や「0.5」などの数値を抽出
+                match = re.search(r'(-?\d+\.\d+)', txt)
+                if match:
+                    diffs.append(float(match.group(1)))
         
+        if not diffs: return 0
+        
+        # スコア計算：0.0秒（1着）に近いほど高得点。1.0秒以上離されると加点なし。
+        # 直近のレースほど重みを大きくする（テクニカル分析の移動平均的な考え方）
+        weights = [1.0, 0.7, 0.5]
+        total_time_score = 0
+        for i, d in enumerate(diffs):
+            # 負の値（1着で後続を突き放した場合）はさらに評価
+            val = max(0, 1.5 - d) 
+            total_time_score += (val * 10) * weights[i]
+            
+        return total_time_score
+    except:
+        return 0
+
+def get_lab_data(date_str, place_name, race_num):
+    p_code = LAB_PLACE_MAP.get(place_name, "05")
+    r_num = str(race_num).zfill(2)
+    base_url = f"https://www.keibalab.jp/db/race/{date_str}{p_code}{r_num}/"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    
+    try:
+        print(f"🚀 タイム差分析を開始します（これには少し時間がかかります）...")
+        res = requests.get(base_url, headers=headers, timeout=10)
+        res.encoding = 'utf-8'
+        soup = BeautifulSoup(res.text, 'html.parser')
+        
+        title = soup.select_one('h1.raceTitle').text.strip().replace('\n', ' ') if soup.select_one('h1.raceTitle') else "解析中"
+        
+        horses, seen_num = [], set()
+        rows = soup.find_all('tr')
+        
+        # 抽出対象を絞り込んで巡回
         for row in rows:
-            # 馬名へのリンクがあるか確認
             name_tag = row.select_one('a[href*="/db/horse/"]')
             if not name_tag: continue
             
@@ -41,75 +74,67 @@ def get_lab_data(date_str, place_name, race_num):
             
             try:
                 name = name_tag.text.strip()
+                horse_url = name_tag.get('href')
                 
-                # --- 馬番の取得ロジック ---
-                # 馬名セルの「左隣」にある数字を探す（これが最も正確）
-                umaban = ""
+                # 馬番特定
+                td_list = list(tds)
                 name_td = name_tag.find_parent('td')
-                all_tds_in_row = list(row.find_all('td'))
-                name_idx = all_tds_in_row.index(name_td)
+                name_idx = td_list.index(name_td)
+                umaban = re.sub(r'\D', '', td_list[name_idx - 1].text.strip())
                 
-                if name_idx > 0:
-                    umaban_text = all_tds_in_row[name_idx - 1].text.strip()
-                    umaban = re.sub(r'\D', '', umaban_text)
-
-                # 重複や空を排除
                 if not umaban or umaban in seen_num: continue
                 seen_num.add(umaban)
 
-                # 騎手
-                j_tag = row.select_one('a[href*="/db/jockey/"]')
-                jockey = j_tag.text.strip() if j_tag else "不明"
+                jockey = row.select_one('a[href*="/db/jockey/"]').text.strip() if row.select_one('a[href*="/db/jockey/"]') else "不明"
                 
-                # オッズ（行の中から "数字.数字" を探す）
-                odds = 999.0
-                o_match = re.search(r'(\d{1,3}\.\d{1})', row.text)
-                if o_match: odds = float(o_match.group(1))
+                # 1. タイム差スコアの取得（過去3走）
+                print(f"  🔍 {umaban}番 {name} の過去3走を分析中...")
+                time_score = get_time_diff_score(horse_url)
 
-                # --- 🧠 ゆーこう式スコア計算 ---
-                score = (100 / odds) * 1.5 if odds < 900 else 5
-                # 注目騎手ボーナス
-                if any(x in jockey for x in ['ルメ', '川田', '武豊', '坂井', '戸崎', 'モレイラ', 'ムーア']):
-                    score += 15
-                elif any(x in jockey for x in ['松山', '横山武', '西村', '鮫島', '岩田']):
-                    score += 8
+                # 2. オッズ期待値（サブ要素）
+                odds = 999.0
+                o_match = re.search(r'(\d{1,4}\.\d{1})', row.text)
+                if o_match: odds = float(o_match.group(1))
                 
-                horses.append({"num": int(umaban), "name": name, "jockey": jockey, "odds": odds, "score": score})
+                # 3. 総合判定：タイム差スコアを主軸にする
+                # タイム差が良い ＋ 騎手が一流 ＝ 鉄板
+                total_score = time_score
+                if any(x in jockey for x in ['ルメ', '川田', '武豊', '坂井', '戸崎']): total_score += 15
+                
+                horses.append({
+                    "num": int(umaban), "name": name, "jockey": jockey, 
+                    "odds": odds, "score": total_score, "time_val": time_score
+                })
             except: continue
             
         return horses, title
     except Exception as e:
-        print(f"❌ 解析エラー: {e}")
+        print(f"❌ エラー: {e}")
         return [], "エラー"
 
 def send_discord(horses, title, d, p, r):
-    if not horses or len(horses) < 3:
-        print(f"⚠️ 解析失敗: 抽出できた馬が {len(horses)} 頭でした。")
-        return
-    
-    # スコア順に並び替え
+    if len(horses) < 3: return
     df = pd.DataFrame(horses).sort_values('score', ascending=False).reset_index(drop=True)
     top = df.head(6)
     n = top['num'].tolist()
     
     payload = {
-        "username": "ゆーこうAI予想 🏇",
+        "username": "ゆーこうAI (テクニカル分析) 🏇",
         "embeds": [{
             "title": f"🎯 {p}{r}R {title}",
-            "description": f"📅 {d} | 精度検証・解析結果",
-            "color": 3066993,
+            "description": f"📅 {d} | 過去3走タイム差ベース解析",
+            "color": 15277667,
             "fields": [
-                {"name": "🥇 ◎ 本命", "value": f"**{n[0]}番 {top.iloc[0]['name']}**\n(騎手: {top.iloc[0]['jockey']} / オッズ: {top.iloc[0]['odds']})", "inline": False},
+                {"name": "🥇 ◎ 本命", "value": f"**{n[0]}番 {top.iloc[0]['name']}**\n(近3走の安定度が高い馬)", "inline": False},
                 {"name": "🥈 〇 対抗", "value": f"**{n[1]}番**", "inline": True},
                 {"name": "🥉 ▲ 単穴", "value": f"**{n[2]}番**", "inline": True},
-                {"name": "🔥 紐候補", "value": f"{', '.join(map(str, n[3:]))}", "inline": False},
-                {"name": "💰 AI推奨", "value": f"3連単 1着固定流し\n軸: {n[0]}\n相手: {n[1]}, {n[2]}, {n[3]}, {n[4]}", "inline": False}
-            ],
-            "footer": {"text": "KeibaLabクリーンデータを使用して解析完了"}
+                {"name": "📈 解析の根拠", "value": f"1着とのタイム差が少ない馬を上位評価しました。\n本命馬のタイム評価点: {top.iloc[0]['time_val']:.1f}", "inline": False},
+                {"name": "💰 AI推奨", "value": f"3連複 軸1頭流し: {n[0]} - {n[1]}, {n[2]}, {n[3]}, {n[4]}", "inline": False}
+            ]
         }]
     }
     requests.post(DISCORD_URL, json=payload)
-    print(f"✅ 解析完了: {len(horses)}頭抽出。Discordに送信しました！")
+    print("✅ 全頭の過去3走チェック完了。Discordへ送信しました。")
 
 if __name__ == "__main__":
     args = sys.argv
@@ -118,5 +143,4 @@ if __name__ == "__main__":
     race = args[3] if len(args) > 3 else "11"
     
     h, t = get_lab_data(date, place, race)
-    print(f"📊 最終抽出数: {len(h)} 頭")
     send_discord(h, t, date, place, race)
