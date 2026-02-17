@@ -7,7 +7,7 @@ import re
 import json
 
 # ==========================================
-# ⚙️ 設定：Discord Webhook URL
+# ⚙️ 設定：Discord Webhook URL (埋め込み済み)
 # ==========================================
 DISCORD_WEBHOOK_URL = "https://discordapp.com/api/webhooks/1473026116825645210/9eR_UIp-YtDqgKem9q4cD9L2wXrqWZspPaDhTLB6HjRQyLZU-gaUCKvKbf2grX7msal3"
 
@@ -18,173 +18,120 @@ PLACE_MAP = {
 }
 
 def find_race_id(date_str, place_name, race_num):
-    y = date_str[:4]
-    p = PLACE_MAP.get(place_name, "05")
-    r = str(race_num).zfill(2)
+    """日付・場所・RからレースIDを特定する"""
+    y, p, r = date_str[:4], PLACE_MAP.get(place_name, "05"), str(race_num).zfill(2)
     try:
-        m = int(date_str[4:6])
-        d = int(date_str[6:8])
-        target_date_text = f"{m}月{d}日"
-    except:
-        print("❌ 日付フォーマットエラー")
-        return None
+        target_date_text = f"{int(date_str[4:6])}月{int(date_str[6:8])}日"
+    except: return None
 
-    print(f"🔍 '{target_date_text}' の {place_name} {race_num}R を捜索中...")
-
+    print(f"🔍 '{target_date_text}' {place_name} {race_num}R を捜索中...")
     for kai in range(1, 8):
         for day in range(1, 13):
-            race_id = f"{y}{p}{str(kai).zfill(2)}{str(day).zfill(2)}{r}"
-            url = f"https://race.netkeiba.com/race/shutuba.html?race_id={race_id}"
+            rid = f"{y}{p}{str(kai).zfill(2)}{str(day).zfill(2)}{r}"
+            url = f"https://race.netkeiba.com/race/shutuba.html?race_id={rid}"
             try:
-                res = requests.get(url, timeout=5)
+                res = requests.get(url, headers={"User-Agent":"Mozilla/5.0"}, timeout=5)
                 res.encoding = 'EUC-JP'
-                if target_date_text in res.text and ("出馬表" in res.text or "レース結果" in res.text):
-                    print(f"✅ ID発見: {race_id}")
-                    return race_id
-            except:
-                continue
+                if target_date_text in res.text:
+                    print(f"✅ ID発見: {rid}")
+                    return rid
+            except: continue
     return None
 
 def get_data(race_id):
-    print(f"📡 データ取得開始: ID {race_id}")
+    """馬番重複を完全に防止してデータを取得"""
     url = f"https://race.netkeiba.com/race/shutuba.html?race_id={race_id}"
-    res = requests.get(url)
+    res = requests.get(url, headers={"User-Agent":"Mozilla/5.0"})
     res.encoding = 'EUC-JP'
     soup = BeautifulSoup(res.text, 'html.parser')
 
     # レース名
-    r_name = "レース名不明"
-    if soup.find('div', class_='RaceName'):
-        r_name = soup.find('div', class_='RaceName').text.strip()
-    elif soup.find('h1'):
-        r_name = soup.find('h1').text.strip()
-    
-    print(f"🏇 レース名: {r_name}")
+    rname = "レース名不明"
+    name_elem = soup.find('div', class_='RaceName') or soup.find('h1')
+    if name_elem: rname = name_elem.text.strip()
 
     horses = []
-    seen_umaban = set()
+    seen = set() # 重複チェック用
 
-    # 行取得
+    # 出馬表か結果ページか判定
     rows = soup.select('tr.HorseList')
-    if not rows: 
-        print("ℹ️ 出馬表モードで取得不可 -> 結果モードで試行")
+    if not rows:
         rows = soup.select('table.RaceTable01 tr')
+        mode = "result"
+    else: mode = "shutuba"
 
-    print(f"📊 取得した行数: {len(rows)}")
-
-    for i, row in enumerate(rows):
+    for row in rows:
         try:
-            # 馬番取得トライ
-            umaban = None
-            u_tag = row.select_one('td.Umaban')
-            if u_tag: 
-                umaban = u_tag.text.strip()
-            else:
-                tds = row.select('td')
-                if len(tds) > 3: umaban = tds[2].text.strip() # 結果ページの3列目
-            
-            # 数字のみ抽出
-            if umaban: umaban = re.sub(r'\D', '', umaban)
-            
-            if not umaban or umaban in seen_umaban: continue
-            seen_umaban.add(umaban)
+            tds = row.select('td')
+            if mode == "shutuba":
+                u_tag = row.select_one('td.Umaban')
+                umaban = u_tag.text.strip() if u_tag else ""
+                n_tag = row.select_one('span.HorseName')
+                name = n_tag.text.strip() if n_tag else ""
+                o_tag = row.select_one('td.Odds')
+                odds_txt = o_tag.text.strip() if o_tag else "999"
+                j_tag = row.select_one('td.Jockey')
+                jockey = j_tag.text.strip() if j_tag else ""
+            else: # 結果ページ
+                if len(tds) < 5: continue
+                umaban = tds[2].text.strip()
+                name = tds[3].text.strip()
+                jockey = tds[6].text.strip() if len(tds) > 6 else "不明"
+                odds_txt = "999"
 
-            # 馬名
-            name_tag = row.select_one('span.HorseName') or row.select_one('a[href*="horse"]')
-            name = name_tag.text.strip() if name_tag else "不明"
+            # 馬番のクリーニングと重複排除
+            umaban = re.sub(r'\D', '', umaban)
+            if not umaban or umaban in seen: continue
+            seen.add(umaban)
 
-            # オッズ
-            odds = 999.0
-            o_tag = row.select_one('td.Odds')
-            if o_tag:
-                txt = o_tag.text.strip()
-                if re.match(r'^\d+(\.\d+)?$', txt): odds = float(txt)
+            # スコア計算 (ゆーこう式 Lite)
+            odds = float(odds_txt) if re.match(r'^\d+(\.\d+)?$', odds_txt) else 999.0
+            score = (100 / odds) * 1.5 if odds < 900 else 5
+            if any(x in jockey for x in ['ルメ', '川田', '武豊', '坂井', '戸崎', 'レーン', 'ムーア']): score += 15
+            elif any(x in jockey for x in ['松山', '横山武', '西村', '鮫島']): score += 8
 
-            # 騎手
-            jockey = "不明"
-            j_tag = row.select_one('td.Jockey')
-            if j_tag: jockey = j_tag.text.strip()
-
-            # スコア計算
-            score = 0
-            if odds < 900: score += (100 / odds) * 1.5
-            else: score += 5
-            
-            if any(x in jockey for x in ['ルメ', '川田', '武豊', '坂井', '戸崎', 'レーン']): score += 15
-
-            horses.append({
-                "馬番": int(umaban), "馬名": name, "オッズ": odds, "騎手": jockey, "スコア": score
-            })
-        except Exception as e:
-            print(f"⚠️ 行解析エラー: {e}")
-            continue
-
-    print(f"🐴 抽出できた馬の数: {len(horses)}頭")
+            horses.append({"num": int(umaban), "name": name, "odds": odds, "jockey": jockey, "score": score})
+        except: continue
     
-    if not horses: return None, r_name
+    if not horses: return None, rname
+    return pd.DataFrame(horses).sort_values('score', ascending=False).reset_index(drop=True), rname
+
+def send_discord(df, rname, date_str, place, r_num):
+    if len(df) < 3: return
+    top = df.head(6)
+    nums = top['num'].tolist()
     
-    df = pd.DataFrame(horses).sort_values('スコア', ascending=False)
-    return df, r_name
-
-def send_discord(df, race_name, date_str, place, r_num):
-    if len(df) < 3:
-        print("❌ エラー: 馬が3頭未満のため予想できません")
-        return
-
-    top1 = df.iloc[0]
-    top2 = df.iloc[1]
-    top3 = df.iloc[2]
-    
-    # 穴馬リスト作成（空文字対策）
-    holes = df.iloc[3:6]['馬番'].tolist()
-    hole_str = ", ".join(map(str, holes))
-    if not hole_str: hole_str = "なし"
-
-    form1 = f"1着: {top1['馬番']}\n2着: {top2['馬番']}, {top3['馬番']}\n3着: {top2['馬番']}, {top3['馬番']}, {hole_str}"
-    form2 = f"1,2着: {top1['馬番']} ⇔ {top2['馬番']}\n3着: {top3['馬番']}, {hole_str}"
-
-    odds_disp = top1['オッズ'] if top1['オッズ'] < 900 else "取得前"
+    # 💰 推奨馬券の構築
+    # 馬連流し
+    uren = f"**{nums[0]}** － {nums[1]}, {nums[2]}, {nums[3]}"
+    # 3連単フォーメーション (◎ 1着固定)
+    form1 = f"1着: {nums[0]}\n2着: {nums[1]}, {nums[2]}\n3着: {nums[1]}, {nums[2]}, {nums[3]}, {nums[4]}"
+    # 3連単マルチ (◎〇 軸2頭)
+    form2 = f"1,2着: {nums[0]} ⇔ {nums[1]}\n3着: {nums[2]}, {nums[3]}, {nums[4]}"
 
     msg = {
-        "username": "ゆーこうAI (Debug)",
+        "username": "ゆーこうAI 🏇",
         "embeds": [{
-            "title": f"🏇 {place}{r_num}R {race_name}",
-            "description": f"📅 {date_str} | デバッグモード",
-            "color": 5763719,
+            "title": f"🎯 {place}{r_num}R {rname}",
+            "description": f"📅 {date_str} | 解析完了",
+            "color": 16753920,
             "fields": [
-                {"name": "🥇 ◎ 本命", "value": f"**{top1['馬番']} {top1['馬名']}** ({odds_disp}倍)", "inline": False},
-                {"name": "🥈 〇 対抗", "value": f"{top2['馬番']} {top2['馬名']}", "inline": True},
-                {"name": "🥉 ▲ 単穴", "value": f"{top3['馬番']} {top3['馬名']}", "inline": True},
-                {"name": "🔥 紐", "value": hole_str, "inline": False},
-                {"name": "買い目", "value": form1 + "\n\n" + form2, "inline": False}
-            ]
+                {"name": "🥇 ◎ 本命", "value": f"**{nums[0]}番 {top.iloc[0]['name']}** ({top.iloc[0]['jockey']})", "inline": False},
+                {"name": "🥈 〇 対抗", "value": f"**{nums[1]}番**", "inline": True},
+                {"name": "🥉 ▲ 単穴", "value": f"**{nums[2]}番**", "inline": True},
+                {"name": "🔥 穴・相手", "value": f"{nums[3]}, {nums[4]}, {nums[5]}", "inline": False},
+                {"name": "💰 推奨馬券", "value": f"**【馬連】**\n{uren}\n\n**【3連単フォーメーション】**\n{form1}\n\n**【3連単マルチ】**\n{form2}", "inline": False}
+            ],
+            "footer": {"text": "Developed by Yuuki & Hybrid-AI"}
         }]
     }
-    
-    print("📤 Discordへ送信中...")
-    try:
-        res = requests.post(DISCORD_WEBHOOK_URL, json=msg)
-        print(f"📩 ステータスコード: {res.status_code}")
-        if res.status_code in [200, 204]:
-            print("✅ 送信成功！")
-        else:
-            print(f"❌ 送信失敗: {res.text}")
-    except Exception as e:
-        print(f"❌ 通信エラー: {e}")
+    requests.post(DISCORD_WEBHOOK_URL, json=msg)
 
 if __name__ == "__main__":
-    if len(sys.argv) > 3:
-        d, p, r = sys.argv[1], sys.argv[2], sys.argv[3]
-    else:
-        d, p, r = "20260222", "東京", "11"
-
-    print(f"🚀 開始: {d} {p} {r}R")
+    d, p, r = (sys.argv[1], sys.argv[2], sys.argv[3]) if len(sys.argv) > 3 else ("20260222", "東京", "11")
     rid = find_race_id(d, p, r)
     if rid:
         df, name = get_data(rid)
         if df is not None:
             send_discord(df, name, d, p, r)
-        else:
-            print("❌ 馬データが空です")
-    else:
-        print("❌ レースIDが見つかりません")
+            print("✅ Discord送信完了")
