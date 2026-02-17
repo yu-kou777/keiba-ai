@@ -1,6 +1,7 @@
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+import urllib3
 from bs4 import BeautifulSoup
 import pandas as pd
 import sys
@@ -8,24 +9,38 @@ import re
 import time
 import random
 
+# SSL警告を無視（突破力向上のため）
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 # --- Discord接続設定 ---
 DISCORD_URL = "https://discordapp.com/api/webhooks/1473026116825645210/9eR_UIp-YtDqgKem9q4cD9L2wXrqWZspPaDhTLB6HjRQyLZU-gaUCKvKbf2grX7msal3"
 
 LAB_PLACE_MAP = {"札幌":"01","函館":"02","福島":"03","新潟":"04","東京":"05","中山":"06","中京":"07","京都":"08","阪神":"09","小倉":"10"}
 
-# 偽装用エージェントリスト
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0"
-]
+# 究極の偽装ヘッダー群
+def get_stealth_headers():
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15"
+    ]
+    return {
+        "User-Agent": random.choice(user_agents),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        "Accept-Language": "ja,en-US;q=0.9,en;q=0.8", # 日本語環境を主張
+        "Accept-Encoding": "gzip, deflate, br",
+        "Referer": "https://www.google.com/", # Google検索から来たフリをする
+        "Connection": "keep-alive",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "cross-site",
+        "Upgrade-Insecure-Requests": "1"
+    }
 
 def create_session():
-    """接続を維持し、切断されても食らいつくセッションを作成"""
     session = requests.Session()
     retries = Retry(
-        total=5,  # 5回までリトライ
-        backoff_factor=2,  # 待機時間を倍々に増やす (2秒, 4秒, 8秒...)
+        total=3,
+        backoff_factor=1,
         status_forcelist=[500, 502, 503, 504],
         allowed_methods=["GET"]
     )
@@ -41,16 +56,15 @@ def safe_float(value):
     except: return 99.9
 
 def analyze_singularity(session, horse_url, odds):
-    """過去3走解析（セッション引き継ぎ版）"""
-    headers = {"User-Agent": random.choice(USER_AGENTS)}
+    """詳細解析"""
     try:
         if not horse_url.startswith("http"):
             horse_url = "https://www.keibalab.jp" + horse_url
             
-        # サーバー負荷を考慮して少し待機
-        time.sleep(random.uniform(1.0, 2.0))
+        time.sleep(random.uniform(1.5, 3.0)) # 人間らしい待機時間
         
-        res = session.get(horse_url, headers=headers, timeout=20)
+        # verify=FalseでSSLの厳密なチェックを回避
+        res = session.get(horse_url, headers=get_stealth_headers(), timeout=30, verify=False)
         soup = BeautifulSoup(res.text, 'html.parser')
         rows = soup.select('table.db-horse-table tbody tr')
         
@@ -61,7 +75,6 @@ def analyze_singularity(session, horse_url, odds):
             tds = row.find_all('td')
             if len(tds) < 14: continue
             
-            # タイム差抽出
             found_diff = False
             for td in tds:
                 txt = td.text.strip()
@@ -72,13 +85,11 @@ def analyze_singularity(session, horse_url, odds):
                         found_diff = True
                         break
             
-            # 着順から補完
             if not found_diff and len(tds) > 11:
                 if "1" in tds[11].text.strip(): diffs.append(0.0)
 
         if not diffs: return 0, False, "タイム差不明"
         
-        # 物理スコア計算
         score = sum(60 for d in diffs if d <= 0.3)
         avg_diff = sum(diffs) / len(diffs)
         score += max(0, 1.5 - avg_diff) * 20
@@ -96,32 +107,29 @@ def get_race_data(date_str, place_name, race_num):
     r_num = str(race_num).zfill(2)
     url = f"https://www.keibalab.jp/db/race/{date_str}{p_code}{r_num}/"
     
-    print(f"📡 観測開始: {url}")
+    print(f"📡 潜入開始: {url}")
     session = create_session()
-    headers = {"User-Agent": random.choice(USER_AGENTS)}
     
     try:
-        # メインレースページ取得
-        res = session.get(url, headers=headers, timeout=30)
+        # verify=False を追加
+        res = session.get(url, headers=get_stealth_headers(), timeout=30, verify=False)
         res.encoding = 'utf-8'
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        t_elem = soup.select_one('h1.raceTitle')
-        title = t_elem.text.strip().replace('\n', ' ') if t_elem else "レース名不明"
-        print(f"🏁 対象: {title}")
+        title_tag = soup.select_one('h1.raceTitle')
+        title = title_tag.text.strip().replace('\n', ' ') if title_tag else "レース情報"
+        print(f"🏁 ターゲット捕捉: {title}")
         
         horses = []
         rows = soup.find_all('tr')
         
-        print("🔍 全頭スキャン開始...")
+        print("🔍 データ抽出シーケンス作動...")
         for row in rows:
             name_tag = row.select_one('a[href*="/db/horse/"]')
             if not name_tag: continue
             
             try:
                 name = name_tag.text.strip()
-                
-                # 馬番取得
                 umaban = "0"
                 tds = row.find_all('td')
                 for i, td in enumerate(tds):
@@ -133,19 +141,15 @@ def get_race_data(date_str, place_name, race_num):
                 
                 if umaban == "0": continue
 
-                # オッズ
                 odds = 99.9
                 m = re.search(r'(\d{1,4}\.\d{1})', row.text)
                 if m: odds = float(m.group(1))
                 
-                # 騎手
                 j_tag = row.select_one('a[href*="/db/jockey/"]')
                 jockey = j_tag.text.strip() if j_tag else ""
 
-                # 詳細解析（リトライ機能付きセッションを渡す）
                 score, is_chaos, note = analyze_singularity(session, name_tag.get('href'), odds)
                 
-                # 騎手補正
                 if any(x in jockey for x in ['ルメ', '川田', '武豊', '坂井', '戸崎']):
                     score += 15
                 
@@ -162,17 +166,16 @@ def get_race_data(date_str, place_name, race_num):
                 
         return horses, title
     except Exception as e:
-        print(f"❌ 接続エラー: {e}")
+        print(f"❌ 接続遮断: {e}")
         return [], "エラー"
 
 def send_to_discord(horses, title, d, p, r):
     if not horses:
-        print("❌ 解析データなし")
+        print("❌ 解析データなし（IPブロックの可能性大）")
         return
 
     df = pd.DataFrame(horses).sort_values('score', ascending=False).reset_index(drop=True)
     
-    # 24点フォーメーション
     axis = df.head(2)['num'].tolist()
     row2 = df.head(4)['num'].tolist()
     
@@ -187,10 +190,10 @@ def send_to_discord(horses, title, d, p, r):
     )
     
     payload = {
-        "username": "教授AI (再接続成功) 🏇",
+        "username": "教授AI (ステルスモード) 🏇",
         "embeds": [{
             "title": f"🎯 {p}{r}R {title}",
-            "description": f"📅 {d} | **通信障害突破・解析完了**",
+            "description": f"📅 {d} | **24点フォーメーション**",
             "color": 3066993,
             "fields": [
                 {"name": "👑 1着軸", "value": f"**{', '.join(map(str, axis))}**", "inline": True},
