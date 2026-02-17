@@ -5,126 +5,190 @@ import sys
 import re
 import time
 
-# --- Discord接続設定 ---
+# --- 設定：Discord Webhook URL ---
 DISCORD_URL = "https://discordapp.com/api/webhooks/1473026116825645210/9eR_UIp-YtDqgKem9q4cD9L2wXrqWZspPaDhTLB6HjRQyLZU-gaUCKvKbf2grX7msal3"
 
 LAB_PLACE_MAP = {"札幌":"01","函館":"02","福島":"03","新潟":"04","東京":"05","中山":"06","中京":"07","京都":"08","阪神":"09","小倉":"10"}
 
 def analyze_singularity(horse_url, odds):
-    """過去3走のタイム差をベクトル解析"""
+    """過去3走のタイム差からエネルギー値を算出（エラー回避版）"""
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
+        # サーバー負荷軽減のため待機
         time.sleep(0.5)
         res = requests.get("https://www.keibalab.jp" + horse_url, headers=headers, timeout=10)
         res.encoding = 'utf-8'
         soup = BeautifulSoup(res.text, 'html.parser')
+        
+        # 過去走テーブルの取得（存在確認）
         rows = soup.select('table.db-horse-table tbody tr')
+        if not rows: return 0, False
         
         diffs = []
         for row in rows[:3]:
             tds = row.find_all('td')
-            if len(tds) > 13:
-                txt = tds[13].text.strip()
-                m = re.search(r'(-?\d+\.\d+)', txt)
-                if m: diffs.append(float(m.group(1)))
+            # 列数が足りない場合はスキップ
+            if len(tds) < 14: continue
+            
+            # タイム差の抽出（正規表現で数値のみ抜く）
+            txt = tds[13].text.strip()
+            m = re.search(r'(-?\d+\.\d+)', txt)
+            if m: diffs.append(float(m.group(1)))
         
         if not diffs: return 0, False
         
-        # あなたのデータに基づいた『特異点』ロジック：0.3秒以内の収束を最重視
+        # --- 教授の特異点ロジック ---
+        # 1. タイム差0.3秒以内の「凝縮」を高評価
         score = sum(50 for d in diffs if d <= 0.3)
+        # 2. 0.6秒以内なら加点（安定性）
         score += sum(20 for d in diffs if 0.3 < d <= 0.6)
         
-        # 市場の歪み（穴馬）：タイム差が良いのに人気薄（15番のような馬）
+        # 3. 穴馬フラグ：能力があるのにオッズが高い（市場の歪み）
         is_ana = (min(diffs) <= 0.5 and odds > 15.0)
         
         return score, is_ana
-    except: return 0, False
+    except Exception as e:
+        print(f"  ⚠️ 詳細分析スキップ: {e}")
+        return 0, False
 
-def get_race_data(d, p, r):
-    p_code = LAB_PLACE_MAP.get(p, "05")
-    url = f"https://www.keibalab.jp/db/race/{d}{p_code}{str(r).zfill(2)}/"
-    print(f"📡 解析対象観測点: {url}")
+def get_race_data(date_str, place_name, race_num):
+    # 日付エラー防止
+    if not date_str or len(date_str) < 8: date_str = "20260207"
     
+    p_code = LAB_PLACE_MAP.get(place_name, "05")
+    r_num = str(race_num).zfill(2)
+    url = f"https://www.keibalab.jp/db/race/{date_str}{p_code}{r_num}/"
+    
+    print(f"📡 観測開始: {url}")
     headers = {"User-Agent": "Mozilla/5.0"}
+    
     try:
-        res = requests.get(url, headers=headers, timeout=10)
+        res = requests.get(url, headers=headers, timeout=15)
+        if res.status_code != 200:
+            print(f"❌ 接続失敗: Status {res.status_code}")
+            return [], "接続エラー"
+            
         res.encoding = 'utf-8'
         soup = BeautifulSoup(res.text, 'html.parser')
-        title = soup.select_one('h1.raceTitle').text.strip().replace('\n', ' ') if soup.select_one('h1.raceTitle') else "解析レース"
+        
+        t_elem = soup.select_one('h1.raceTitle')
+        title = t_elem.text.strip().replace('\n', ' ') if t_elem else "レース解析"
         
         horses = []
-        # 全てのテーブル行をスキャン
-        for row in soup.find_all('tr'):
-            name_tag = row.select_one('a[href*="/db/horse/"]')
-            if not name_tag: continue
-            
-            tds = row.find_all('td')
-            if len(tds) < 5: continue
-            
+        rows = soup.find_all('tr')
+        
+        print(f"🔍 データ抽出中...")
+        for row in rows:
             try:
+                # 馬名リンクがある行のみ対象
+                name_tag = row.select_one('a[href*="/db/horse/"]')
+                if not name_tag: continue
+                
+                tds = row.find_all('td')
+                if len(tds) < 5: continue
+                
                 name = name_tag.text.strip()
-                # 【修正】馬番を相対位置からではなく、テキストから確実に抽出
-                umaban = ""
-                for td in tds:
-                    t_txt = td.text.strip()
-                    if t_txt.isdigit() and 1 <= int(t_txt) <= 18:
-                        if td.find_next_sibling() and td.find_next_sibling().select_one('a[href*="/db/horse/"]'):
-                            umaban = t_txt
-                            break
+                horse_url = name_tag.get('href')
                 
-                if not umaban: continue
-
+                # --- 馬番の堅牢な取得 ---
+                # 馬名セルの「左隣」にある数字を探す（これが最も確実）
+                umaban = "0"
+                for i, td in enumerate(tds):
+                    if td == name_tag.find_parent('td'):
+                        if i > 0:
+                            prev_text = tds[i-1].text.strip()
+                            if prev_text.isdigit(): umaban = prev_text
+                        break
+                
+                # オッズ取得（数値が含まれるセルを検索）
+                odds = 999.0
+                match_odds = re.search(r'(\d{1,4}\.\d{1})', row.text)
+                if match_odds: odds = float(match_odds.group(1))
+                
+                # 騎手名
                 jockey = row.select_one('a[href*="/db/jockey/"]').text.strip() if row.select_one('a[href*="/db/jockey/"]') else "不明"
-                odds_m = re.search(r'(\d{1,4}\.\d{1})', row.text)
-                odds = float(odds_m.group(1)) if odds_m else 99.0
+
+                # 詳細分析へ
+                score, is_ana = analyze_singularity(horse_url, odds)
                 
-                score, is_ana = analyze_singularity(name_tag.get('href'), odds)
-                if any(x in jockey for x in ['ルメ', '川田', '武豊', '坂井', '戸崎', '西村淳']): score += 15
+                # 騎手ボーナス（ルメール、川田、武豊、坂井、戸崎）
+                if any(x in jockey for x in ['ルメ', '川田', '武豊', '坂井', '戸崎']):
+                    score += 15
                 
-                horses.append({"num": int(umaban), "name": name, "score": score, "is_ana": is_ana, "odds": odds})
-                print(f"  √ 観測完了: {umaban}番 {name}")
-            except: continue
-            
+                horses.append({
+                    "num": int(umaban),
+                    "name": name,
+                    "score": score,
+                    "is_ana": is_ana,
+                    "odds": odds
+                })
+                print(f"  √ {umaban}番 {name}: 解析完了 (Score: {score})")
+                
+            except Exception as e:
+                # 1頭のエラーで全体を止めない
+                continue
+                
         return horses, title
     except Exception as e:
-        print(f"❌ エラー: {e}"); return [], ""
+        print(f"❌ 重大エラー: {e}")
+        return [], "エラー"
 
 def send_to_discord(horses, title, d, p, r):
-    if not horses: return
+    if not horses:
+        print("⚠️ 送信データがありません。")
+        return
+
+    # スコア順にソート
     df = pd.DataFrame(horses).sort_values('score', ascending=False).reset_index(drop=True)
     
-    # 軸2頭（数学的特異点）
-    axis = df.head(2)['num'].tolist()
-    # 相手4頭（上位馬 ＋ 激走穴馬）
-    ana_candidates = df[df['is_ana']].head(2)['num'].tolist()
-    others = df.iloc[2:6]['num'].tolist()
-    row2 = list(dict.fromkeys(axis + others[:2])) # 軸＋有力2頭
-    row3 = list(dict.fromkeys(axis + others + ana_candidates))[:6] # 軸＋相手＋穴
-
+    # 軸（トップ2）
+    axis = df.head(2)
+    axis_nums = axis['num'].tolist()
+    
+    # 2列目（トップ3＋穴馬）
+    row2_candidates = df.head(3)['num'].tolist()
+    
+    # 3列目（トップ5＋穴フラグ持ち）
+    ana_list = df[df['is_ana']]['num'].tolist()
+    row3_candidates = list(set(df.head(5)['num'].tolist() + ana_list))[:6] # 最大6頭
+    
+    # フォーマット作成
+    msg_title = f"🎯 {p}{r}R {title}"
+    axis_str = ", ".join(map(str, axis_nums))
+    row2_str = ", ".join(map(str, row2_candidates))
+    row3_str = ", ".join(map(str, row3_candidates))
+    
+    # 推奨買い目（1着-2着-3着）
+    kai_me = f"1着: {axis_str}\n2着: {row2_str}\n3着: {row3_str}"
+    
     payload = {
-        "username": "教授AI (数理的3連単) 🏇",
+        "username": "教授AI (物理的3連単) 🏇",
         "embeds": [{
-            "title": f"🎯 {p}{r}R {title}",
-            "description": f"📅 {d} | **数学的最適解（24点構成）**",
-            "color": 3447003,
+            "title": msg_title,
+            "description": f"📅 {d} | **エネルギー効率最大化モデル**",
+            "color": 3066993,
             "fields": [
-                {"name": "👑 1着軸", "value": f"**{axis[0]}番, {axis[1]}番**", "inline": True},
-                {"name": "🐎 2着候補", "value": f"{', '.join(map(str, row2))}", "inline": True},
-                {"name": "🌀 3着候補", "value": f"{', '.join(map(str, row3))}", "inline": True},
-                {"name": "💰 推奨買い目: 3連単(24点)", "value": f"**1着**: {axis[0]}, {axis[1]}\n**2着**: {', '.join(map(str, row2))}\n**3着**: {', '.join(map(str, row3))}", "inline": False},
-                {"name": "📈 理論的裏付け", "value": "1頭軸＋別働BOXの欠陥を修正。軸馬が2着に落ちる事象をカバーしつつ、タイム差収束馬（7番）と市場の歪み（15番）を同一フォーメーション内に統合しました。", "inline": False}
+                {"name": "👑 1着軸 (特異点)", "value": f"**{axis_str}**", "inline": True},
+                {"name": "🐎 2列目 (イベント地平線)", "value": f"**{row2_str}**", "inline": True},
+                {"name": "🌀 3列目 (カオス領域)", "value": f"{row3_str}", "inline": False},
+                {"name": "💰 教授の推奨フォーメーション", "value": kai_me, "inline": False},
+                {"name": "📈 解析サマリー", "value": "軸馬の2着・3着漏れをカバーしつつ、タイム差の収束（0.3秒以内）が見られる馬を2列目に厚く配置しました。", "inline": False}
             ]
         }]
     }
-    requests.post(DISCORD_URL, json=payload)
-    print("✅ Discordへ送信しました。")
+    
+    try:
+        res = requests.post(DISCORD_URL, json=payload)
+        print(f"✅ Discord送信完了: {res.status_code}")
+    except Exception as e:
+        print(f"❌ Discord送信失敗: {e}")
 
 if __name__ == "__main__":
     args = sys.argv
-    # デフォルトをアルデバランSに設定（即検証可能）
-    date = args[1] if len(args) > 1 and args[1] != "" else "20260207"
-    place = args[2] if len(args) > 2 and args[2] != "" else "京都"
-    race = args[3] if len(args) > 3 and args[3] != "" else "11"
+    # 引数がない場合はアルデバランSをデフォルトに
+    date = args[1] if len(args) > 1 else "20260207"
+    place = args[2] if len(args) > 2 else "京都"
+    race = args[3] if len(args) > 3 else "11"
     
-    h, t = get_race_data(date, place, race)
-    send_to_discord(h, t, date, place, race)
+    h_list, t_str = get_race_data(date, place, race)
+    send_to_discord(h_list, t_str, date, place, race)
