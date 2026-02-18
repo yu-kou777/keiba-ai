@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -9,220 +10,167 @@ import re
 import time
 import random
 
-# SSL警告無視
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- Discord接続設定 ---
+# --- 設定：Discord Webhook ---
 DISCORD_URL = "https://discordapp.com/api/webhooks/1473026116825645210/9eR_UIp-YtDqgKem9q4cD9L2wXrqWZspPaDhTLB6HjRQyLZU-gaUCKvKbf2grX7msal3"
 
 LAB_PLACE_MAP = {"札幌":"01","函館":"02","福島":"03","新潟":"04","東京":"05","中山":"06","中京":"07","京都":"08","阪神":"09","小倉":"10"}
 
-# --- 🧪 アルデバランS (2026/02/07) 緊急バックアップデータ ---
-# 通信遮断時でもロジック検証を行うための「ブラックボックス」
-ALDEBARAN_DATA = [
-    {"num": 1, "name": "リアレスト", "odds": 55.1, "diffs": [0.9, 0.7, 1.8, 0.5, -0.1]}, # 過去に勝利あり
-    {"num": 2, "name": "キョウキランブ", "odds": 8.2, "diffs": [0.0, 0.4, 0.2, 0.1, 0.3]},
-    {"num": 3, "name": "ピカピカサンダー", "odds": 7.0, "diffs": [0.5, 0.1, 0.3, 0.8, 0.2]},
-    {"num": 4, "name": "ホールシバン", "odds": 67.2, "diffs": [1.3, 1.0, 1.4, 0.7, 0.9]},
-    {"num": 5, "name": "エナハツホ", "odds": 128.5, "diffs": [1.4, 0.9, 2.1, 1.8, 1.5]},
-    {"num": 6, "name": "ドラゴンブースト", "odds": 9.9, "diffs": [0.1, 1.6, 1.7, 0.2, 0.0]},
-    {"num": 7, "name": "ゼットリアン", "odds": 11.2, "diffs": [0.3, 0.1, 1.2, 1.6, 0.2]}, # 7番: 常に僅差
-    {"num": 8, "name": "シュバルツクーゲル", "odds": 17.5, "diffs": [1.4, 0.9, 0.8, 3.0, 0.5]},
-    {"num": 9, "name": "フォーチュンテラー", "odds": 24.4, "diffs": [0.9, 1.8, 1.2, 3.9, 0.4]},
-    {"num": 10, "name": "ディープリボーン", "odds": 10.9, "diffs": [1.9, 0.0, 0.0, 0.1, 0.3]},
-    {"num": 11, "name": "ミッキークレスト", "odds": 11.4, "diffs": [0.5, 0.1, 0.2, 0.8, 0.4]},
-    {"num": 12, "name": "タイトニット", "odds": 7.3, "diffs": [0.2, 0.4, 0.1, 0.0, 0.3]},
-    {"num": 13, "name": "トリポリタニア", "odds": 3.7, "diffs": [0.1, 0.0, 0.3, 0.2, 0.5]},
-    {"num": 14, "name": "メイショウユズルハ", "odds": 63.7, "diffs": [1.1, 0.8, 1.5, 2.0, 1.2]},
-    {"num": 15, "name": "ロードプレジール", "odds": 22.8, "diffs": [0.4, 0.3, 0.6, 0.2, 0.5]}, # 15番: 隠れた実力
-    {"num": 16, "name": "ジューンアヲニヨシ", "odds": 16.5, "diffs": [1.7, 0.2, 0.1, 1.9, 0.3]}
-]
-
 def get_stealth_headers():
     user_agents = [
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15"
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
     ]
-    return {
-        "User-Agent": random.choice(user_agents),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Referer": "https://www.google.com/",
-        "Upgrade-Insecure-Requests": "1"
-    }
+    return {"User-Agent": random.choice(user_agents), "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8", "Referer": "https://www.google.com/"}
 
-def create_session():
-    session = requests.Session()
-    retries = Retry(total=2, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
-    session.mount("https://", HTTPAdapter(max_retries=retries))
-    return session
-
-def safe_float(value):
-    try: return float(re.sub(r'[^\d\.-]', '', str(value)))
-    except: return 99.9
-
-def calculate_score(diffs, odds):
+def analyze_horse_history(session, horse_url, name):
     """
-    【ピーク・ポテンシャル理論】
-    平均値を無視し、最大瞬間風速（ベストパフォーマンス）を評価する
+    【馬柱スキャン機能】
+    各馬の個別ページへ飛び、過去5走のタイム差を抽出。
     """
-    if not diffs: return 0, False
-    
-    score = 0
-    best_diff = min(diffs)
-    
-    # 1. 才能のピーク値 (Best Performance)
-    if best_diff <= 0.0: score += 50      # 勝利経験あり
-    elif best_diff <= 0.2: score += 35    # 僅差
-    elif best_diff <= 0.5: score += 20    # 善戦
-    
-    # 2. 7番(オーロイプラータ)用: 惜敗の頻度
-    # 「0.5秒差以内の負け」が多いほど、実は強い
-    regret_count = sum(1 for d in diffs if 0.0 <= d <= 0.5)
-    score += regret_count * 15
-    
-    # 3. 1番(リアレスト)用: 復活の可能性
-    # 直近が悪くても過去に0.0秒以下があれば、人気薄で爆発
-    is_chaos = (best_diff <= 0.0 and odds > 20.0) 
-    
-    # 4. 15番(ロードプレジール)用: 安定カオス
-    # 平均的に良いのに人気がない
-    avg_diff = sum(diffs) / len(diffs)
-    if avg_diff <= 0.6 and odds > 15.0:
-        is_chaos = True
-        score += 10
-
-    if is_chaos: score += 25 # 穴馬ボーナス
-
-    return score, is_chaos
-
-def analyze_web(session, horse_url, odds):
     try:
-        if not horse_url.startswith("http"): horse_url = "https://www.keibalab.jp" + horse_url
-        time.sleep(random.uniform(0.5, 1.0))
-        res = session.get(horse_url, headers=get_stealth_headers(), timeout=10, verify=False)
+        # 相対パスを絶対パスへ変換
+        if not horse_url.startswith("http"):
+            full_url = "https://www.keibalab.jp" + horse_url
+        else:
+            full_url = horse_url
+            
+        print(f"  🔍 {name} の馬柱(過去5走)をスキャン中...") # 証拠を表示
+        time.sleep(random.uniform(0.8, 1.5))
+        
+        res = session.get(full_url, headers=get_stealth_headers(), timeout=15, verify=False)
         soup = BeautifulSoup(res.text, 'html.parser')
+        
+        # 過去成績テーブルを特定
         rows = soup.select('table.db-horse-table tbody tr')
-        if not rows: return 0, False
+        if not rows:
+            print(f"    ⚠️ {name}: 過去データが見つかりません")
+            return 0, False, "データなし"
         
         diffs = []
-        for row in rows[:5]:
+        for row in rows[:5]: # 直近5走を抽出
             tds = row.find_all('td')
             if len(tds) < 14: continue
+            
+            # タイム差(着差)のカラムを探す
             val = 99.9
             for td in tds:
                 txt = td.text.strip()
                 if re.match(r'^\(?\-?\d+\.\d+\)?$', txt):
-                    val = safe_float(txt)
+                    val = float(re.sub(r'[^\d\.-]', '', txt))
                     break
-            if val < 5.0: diffs.append(val)
             
-        return calculate_score(diffs, odds)
-    except: return 0, False
+            if val < 5.0:
+                diffs.append(val)
 
-def get_race_data(date_str, place_name, race_num):
-    if not date_str or len(date_str) < 8: date_str, place_name, race_num = "20260207", "京都", "11"
-    p_code = LAB_PLACE_MAP.get(place_name, "08")
-    url = f"https://www.keibalab.jp/db/race/{date_str}{p_code}{str(race_num).zfill(2)}/"
+        if not diffs: return 0, False, "対象走なし"
+        
+        # --- スコア計算ロジック ---
+        score = 0
+        best_diff = min(diffs)
+        if best_diff <= 0.0: score += 60      
+        elif best_diff <= 0.3: score += 45    
+        regret_count = sum(1 for d in diffs if 0.0 <= d <= 0.5)
+        score += regret_count * 15            
+        
+        return score, best_diff
+    except Exception as e:
+        return 0, 99.9
+
+def get_future_race(d, p, r):
+    """
+    【未来予測・特化型】
+    shutsubahyou.html を強制的に見に行き、未来の出走馬を捕捉。
+    """
+    if not d: d = time.strftime("%Y%m%d")
+    p_code = LAB_PLACE_MAP.get(p, "05")
+    # 未来の出馬表URLを生成
+    url = f"https://www.keibalab.jp/db/race/{d}{p_code}{str(r).zfill(2)}/shutsubahyou.html"
     
-    print(f"📡 接続試行: {url}")
-    session = create_session()
-    horses = []
-    title = "アルデバランS (通信不能時バックアップ)"
+    print(f"📡 未来予測フェーズ始動: {url}")
+    session = requests.Session()
+    session.mount("https://", HTTPAdapter(max_retries=3))
     
     try:
-        # Web接続を試みる
-        res = session.get(url, headers=get_stealth_headers(), timeout=15, verify=False)
-        if res.status_code != 200: raise Exception("Block")
-        
+        res = session.get(url, headers=get_stealth_headers(), timeout=30, verify=False)
         res.encoding = 'utf-8'
         soup = BeautifulSoup(res.text, 'html.parser')
-        title = soup.select_one('h1.raceTitle').text.strip().replace('\n', ' ')
         
-        print("✅ 接続成功: リアルタイム解析を開始")
+        # レース名
+        title_tag = soup.select_one('h1.raceTitle')
+        title = title_tag.text.strip().replace('\n', ' ') if title_tag else "未来のレース"
+        
+        horses = []
+        # 出馬表から馬の情報を抽出
         rows = soup.find_all('tr')
+        print(f"📊 「{title}」の出走馬を検知しました。解析を開始します。")
+        
         for row in rows:
-            name_tag = row.select_one('a[href*="/db/horse/"]')
-            if not name_tag: continue
-            try:
-                name = name_tag.text.strip()
-                umaban = "0"
-                tds = row.find_all('td')
-                for i, td in enumerate(tds):
-                    if td == name_tag.find_parent('td'):
-                        if i > 0 and tds[i-1].text.strip().isdigit(): umaban = tds[i-1].text.strip()
-                        break
-                if umaban == "0": continue
-                
-                odds = 99.9
-                m = re.search(r'(\d{1,4}\.\d{1})', row.text)
-                if m: odds = float(m.group(1))
-                
-                score, is_chaos = analyze_web(session, name_tag.get('href'), odds)
-                horses.append({"num": int(umaban), "name": name, "score": score, "is_ana": is_chaos})
-            except: continue
+            # 馬の個別ページへのリンクを探す
+            link_tag = row.select_one('a[href*="/db/horse/"]')
+            if not link_tag: continue
             
+            name = link_tag.text.strip()
+            # 馬番
+            tds = row.find_all('td')
+            umaban = "0"
+            for i, td in enumerate(tds):
+                if td == link_tag.find_parent('td'):
+                    if i > 0 and tds[i-1].text.strip().isdigit(): umaban = tds[i-1].text.strip()
+                    break
+            
+            # オッズ（未来の場合、まだ出ていない可能性を考慮）
+            odds_m = re.search(r'(\d{1,4}\.\d{1})', row.text)
+            odds = float(odds_m.group(1)) if odds_m else 99.9
+            
+            # --- ここで「馬の履歴（馬柱）」を見に行く ---
+            score, best = analyze_horse_history(session, link_tag.get('href'), name)
+            
+            is_chaos = (best <= 0.6 and odds > 15.0)
+            horses.append({"num": int(umaban), "name": name, "score": score, "is_ana": is_chaos, "best": best})
+            
+        return horses, title
     except Exception as e:
-        print(f"⚠️ 通信遮断検知 ({e}) -> バックアップデータでロジック検証を実行します")
-        # アルデバランSの場合のみバックアップを使用
-        if "20260207" in date_str and "11" in str(race_num):
-            for h in ALDEBARAN_DATA:
-                score, is_chaos = calculate_score(h["diffs"], h["odds"])
-                horses.append({"num": h["num"], "name": h["name"], "score": score, "is_ana": is_chaos})
-        else:
-            print("❌ バックアップ対象外のレースです")
-            return [], "エラー"
+        print(f"❌ 解析失敗: {e}")
+        return [], "Err"
 
-    return horses, title
-
-def send_to_discord(horses, title, d, p, r):
-    if not horses: return
+def send_result(horses, title, d, p, r):
+    if not horses or len(horses) < 3: return
     df = pd.DataFrame(horses).sort_values('score', ascending=False).reset_index(drop=True)
     
-    # --- 新ロジック：ピークポテンシャル・フォーメーション ---
+    # フィルタロジック
+    top_score = df.iloc[0]['score']
+    gap = top_score - df.iloc[min(3, len(df)-1)]['score']
+    limit = 5 if top_score >= 75 and gap >= 15 else 9
     
-    # 1列目: スコア上位3頭
-    # ここに「惜敗の多い7番」や「能力値の高い12番」が入る想定
     row1 = df.head(3)['num'].tolist()
-    
-    # 2列目: 上位5頭
     row2 = df.head(5)['num'].tolist()
-    
-    # 3列目: カオス枠（穴馬）を優先的に採用
-    # 1番(リアレスト)や15番(ロードプレジール)はここで必ず拾う
-    ana_list = df[df['is_ana']]['num'].tolist()
-    candidates = df.head(6)['num'].tolist() + ana_list
-    row3 = list(dict.fromkeys(candidates))[:9] # 最大9頭
+    ana = df[df['is_ana']]['num'].tolist()
+    row3 = list(dict.fromkeys(row2 + ana + df.iloc[5:8]['num'].tolist()))[:limit]
 
-    buy_str = (
-        f"**1列目**: {', '.join(map(str, row1))}\n"
-        f"**2列目**: {', '.join(map(str, row2))}\n"
-        f"**3列目**: {', '.join(map(str, row3))}"
-    )
-    
     payload = {
-        "username": "教授AI (ハイブリッド版) 🏇",
+        "username": "教授AI (未来観測モード) 🏇",
         "embeds": [{
-            "title": f"🎯 {p}{r}R {title}",
-            "description": f"📅 {d} | **ピーク・ポテンシャル理論 (通信補完済)**",
-            "color": 3447003,
+            "title": f"🎯 【未来予測】{p}{r}R {title}",
+            "description": f"📅 {d} | **3-5-{limit} 構成**",
+            "color": 3066993,
             "fields": [
-                {"name": "🧪 解析ロジック", "value": "平均値を廃止し『最大瞬間風速（過去のベストパフォーマンス）』と『惜敗回数』を評価。7番や1番のようなムラ馬を捕捉します。", "inline": False},
-                {"name": "🔥 1列目 (Axis 3)", "value": f"**{', '.join(map(str, row1))}**", "inline": True},
-                {"name": "🌊 3列目 (Chaos)", "value": f"**{', '.join(map(str, row3))}**", "inline": False},
-                {"name": "💰 推奨フォーメーション", "value": buy_str, "inline": False}
+                {"name": "📊 解析ログ", "value": f"```全頭の過去5走(馬柱)をスキャン完了。\n軸信頼度: {top_score} / 判定: {'精密' if limit==5 else '広域'}```", "inline": False},
+                {"name": "🔥 軸・相手", "value": f"**{', '.join(map(str, row1))}** → **{', '.join(map(str, row2))}**", "inline": False},
+                {"name": "💰 推奨フォーメーション", "value": f"1列目: {row1}\n2列目: {row2}\n3列目: {row3}", "inline": False}
             ]
         }]
     }
     requests.post(DISCORD_URL, json=payload)
-    print("✅ Discord送信完了")
+    print(f"✅ Discordへ未来の予想を送信しました。")
 
 if __name__ == "__main__":
-    try:
-        args = sys.argv
-        date = args[1] if len(args) > 1 else "20260207"
-        place = args[2] if len(args) > 2 else "京都"
-        race = args[3] if len(args) > 3 else "11"
-    except: date, place, race = "20260207", "京都", "11"
+    args = sys.argv
+    date = args[1] if len(args) > 1 else "" # 指定がなければ今日
+    place = args[2] if len(args) > 2 else "東京"
+    race = args[3] if len(args) > 3 else "11"
     
-    h, t = get_race_data(date, place, race)
-    send_to_discord(h, t, date, place, race)
+    h, t = get_future_race(date, place, race)
+    send_result(h, t, date, place, race)
+    input("\n解析が完了しました。Enterキーで閉じます...")
