@@ -2,99 +2,119 @@ import streamlit as st
 import pandas as pd
 import re
 
-st.set_page_config(page_title="AI競馬：高精度・完全版", layout="centered")
+st.set_page_config(page_title="AI競馬：最新ロジック・期待値モデル", layout="wide")
 
-st.title("🏇 AI競馬：高精度解析予想")
-st.write("競馬ラボの『簡易出馬表』を全選択コピーして貼り付けてください。")
+st.title("🏇 AI競馬：最新期待値解析ツール")
+st.write("あなたのエクセルの『高精度ロジック』をスマホで再現します。")
 
-# --- 内部データベース：最新有力血統 (エクセルの種牡馬50/BMS50相当) ---
-TOP_SIRES = ["ドゥラメンテ", "ロードカナロア", "ディープインパクト", "キズナ", "エピファネイア", "ハーツクライ", "モーリス"]
-TOP_BMS = ["ディープインパクト", "キングカメハメハ", "マンハッタンカフェ", "シンボリクリスエス"]
+# --- 内部データベース：最新有力血統 (2026年版) ---
+TOP_SIRES = ["ドゥラメンテ", "ロードカナロア", "ディープインパクト", "キズナ", "エピファネイア", "ハーツクライ", "ジャスタウェイ"]
 
-def smart_parse(text):
+def advanced_parse(text):
     """
-    ぐちゃぐちゃなテキストから「馬番・馬名・父・オッズ」を正確にセットで抜き出す
+    スマホの『ぐちゃぐちゃコピペ』から、正確にデータを構造化する
     """
-    # 1. テキストを行ごとに分割し、余計な空白を消す
-    lines = [line.strip() for line in text.split('\n') if line.strip()]
-    
+    lines = [l.strip() for l in text.split('\n') if l.strip()]
     extracted = []
     
-    # 2. 「馬番」を起点にデータをセット化する
-    # 競馬ラボ等の構造: 枠, 馬, 印, 馬名, 指数, 血統(父)... 斤量, 騎手, 単勝(オッズ)
-    for i in range(len(lines)):
-        # 行が「馬番(1-18)」で始まっているかチェック
-        # 例: "11 ミッキークレスト" または "11 \n ミッキークレスト"
-        match = re.match(r'^(\d{1,2})$', lines[i])
-        if match:
-            try:
-                baban = match.group(1)
-                # 馬名は馬番のすぐ後か、数行先にある
-                name = ""
-                sire = ""
-                odds = 0.0
-                
-                # 次の15行以内から必要な情報を探す
-                for j in range(i + 1, min(i + 15, len(lines))):
-                    # 馬名の抽出 (2-9文字のカタカナ)
-                    if not name and re.match(r'^[ァ-ヶー]{2,9}$', lines[j]):
-                        name = lines[j]
-                        continue
-                    # 父馬の抽出 (馬名が決まった後に最初に出てくるカタカナ)
-                    if name and not sire and re.match(r'^[ァ-ヶー]{2,10}$', lines[j]) and lines[j] != name:
-                        sire = lines[j]
-                        continue
-                    # オッズの抽出 (x.x の形式)
-                    odds_match = re.match(r'^(\d{1,3}\.\d)$', lines[j])
-                    if odds_match:
-                        odds = float(odds_match.group(1))
-                        break
-                
-                if name and odds > 0:
-                    extracted.append({"馬番": baban, "馬名": name, "父": sire, "オッズ": odds})
-            except:
-                continue
+    # 馬番(1-18)を探し、そこから次の馬番までのブロックを1頭分として処理
+    blocks = []
+    current_block = []
+    for line in lines:
+        if re.match(r'^(\d{1,2})$', line):
+            if current_block: blocks.append(current_block)
+            current_block = [line]
+        else:
+            if current_block: current_block.append(line)
+    if current_block: blocks.append(current_block)
+
+    for block in blocks:
+        try:
+            baban = block[0]
+            # 馬名：カタカナ2-9文字
+            name = next((l for l in block if re.match(r'^[ァ-ヶー]{2,9}$', l)), "不明")
+            # オッズ：1.0〜999.9
+            odds = next((float(l) for l in block if re.match(r'^\d{1,3}\.\d$', l)), 0.0)
+            # 人気：オッズの次に来る数字を想定
+            pop = next((int(l) for l in block if re.match(r'^\d{1,2}$', l) and l != baban), 99)
+            # 父：馬名の後に出てくるカタカナ
+            found_name = False
+            sire = "不明"
+            for l in block:
+                if l == name: found_name = True; continue
+                if found_name and re.match(r'^[ァ-ヶー]{2,10}$', l):
+                    sire = l
+                    break
+            
+            if name != "不明" and odds > 0:
+                extracted.append({"馬番": baban, "馬名": name, "父": sire, "オッズ": odds, "人気": pop})
+        except:
+            continue
 
     return pd.DataFrame(extracted).drop_duplicates(subset=['馬番'])
 
 # --- UI ---
-st.info("💡 競馬ラボの『簡易出馬表』ページを全選択（長押し→すべて選択）してコピーし、下に貼り付けてください。")
-raw_input = st.text_area("コピペエリア", height=300, placeholder="ここにペースト...")
+st.info("💡 競馬ラボの『簡易出馬表』を全選択コピーして貼り付けてください。")
+raw_input = st.text_area("コピペエリア", height=300)
 
-if st.button("AI予想を実行"):
+if st.button("最新ロジックで分析実行"):
     if raw_input:
-        df = smart_parse(raw_input)
+        df = advanced_parse(raw_input)
         
         if not df.empty:
-            # --- 最新ロジック適用 (エクセル不要) ---
-            def calculate_ai_score(row):
-                score = 50 # 基準
-                # 血統加点 (父がランキング上位なら+20)
-                if any(s in str(row['父']) for s in TOP_SIRES): score += 20
-                # BMS加点 (簡易的に父名にBMS有力馬がいれば+10)
-                if any(b in str(row['父']) for b in TOP_BMS): score += 10
-                return score
+            # --- 最新ロジック：期待値スコアリング ---
+            def get_ai_prediction(row):
+                # 1. 市場予測（オッズから逆算した勝率）
+                market_prob = 0.8 / row['オッズ'] # 控除率を考慮
+                
+                # 2. 独自加点（エクセルの高精度条件）
+                score = 1.0 # 基準
+                
+                # 血統加点
+                if any(s in row['父'] for s in TOP_SIRES): score *= 1.2
+                
+                # 人気薄の激走期待値（人気以上に能力があると判定する条件）
+                if row['人気'] >= 4 and row['オッズ'] <= 20.0: score *= 1.15
+                
+                # 想定勝率
+                final_prob = market_prob * score
+                return final_prob
 
-            df["AIスコア"] = df.apply(calculate_ai_score, axis=1)
-            # 期待値 = (AIスコア/50) * (15/オッズ)
-            df["期待値"] = (df["AIスコア"] / 50) * (15 / df["オッズ"])
+            df["想定勝率"] = df.apply(get_ai_prediction, axis=1)
+            # 期待値 = 想定勝率 * オッズ
+            df["期待値"] = df["想定勝率"] * df["オッズ"]
             
-            st.success(f"{len(df)}頭を正確に認識しました！")
+            # 判定
+            def judge(ev):
+                if ev >= 1.2: return "★激熱"
+                if ev >= 1.0: return "◎買い"
+                if ev >= 0.85: return "○注目"
+                return "－"
+            
+            df["判定"] = df["期待値"].apply(judge)
             res_df = df.sort_values("期待値", ascending=False)
             
-            # 結果の表示
-            st.subheader("📊 期待値ランキング（回収率重視）")
-            st.table(res_df[['馬番', '馬名', '父', 'オッズ', '期待値']].head(10))
+            st.success("最新の期待値モデルで解析を完了しました。")
             
-            # 買い目提案
+            # 結果表示（スマホで見やすく整形）
+            st.subheader("📊 期待値ランキング（高順位ほど回収率が高い）")
+            # 期待値1.0以上をハイライト
+            st.table(res_df[['馬番', '馬名', 'オッズ', '期待値', '判定']].head(10))
+            
+            # 買い目構築
             st.divider()
-            st.subheader("🎯 推奨買い目")
-            top_3 = res_df.head(3)
-            st.write(f"**◎ 軸馬:** {top_3.iloc[0]['馬名']} ({top_3.iloc[0]['馬番']})")
-            st.write(f"**相手:** {', '.join(top_3['馬名'].tolist()[1:])}")
-            st.info("💡 馬連・ワイドBOX、または3連単の1頭軸マルチが推奨です。")
+            st.subheader("🎯 推奨買い目（期待値ベース）")
+            top_ev = res_df[res_df["期待値"] >= 1.0].head(5)
+            
+            if not top_ev.empty:
+                baban_list = top_ev["馬番"].tolist()
+                st.write(f"**【本命馬】** {top_ev.iloc[0]['馬名']} (馬番:{top_ev.iloc[0]['馬番']})")
+                st.info(f"**【推奨】** 馬連・ワイドBOX: {', '.join(baban_list)}")
+                st.warning(f"**【勝負】** 3連単1頭軸マルチ: {baban_list[0]} → {', '.join(baban_list[1:])}")
+            else:
+                st.write("現在、期待値が基準を超える馬がいません。見送り推奨です。")
+                
         else:
-            st.error("馬のデータを特定できませんでした。")
-            st.info("【解決策】競馬ラボの『簡易出馬表』のページで、馬の名前が載っている表の部分をしっかりコピーしてから貼り付けてください。")
+            st.error("データの抽出に失敗しました。馬名とオッズが含まれるようにコピーしてください。")
     else:
-        st.warning("データを貼り付けてください。")
+        st.warning("データを入力してください。")
