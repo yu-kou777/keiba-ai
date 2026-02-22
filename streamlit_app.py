@@ -2,10 +2,11 @@ import streamlit as st
 import pandas as pd
 import re
 
-st.set_page_config(page_title="AI競馬：オメガ指数・予想タイム解析", layout="wide")
+st.set_page_config(page_title="AI競馬：前走オメガ・数値実績解析", layout="wide")
 
-# --- 1. 超精密・オメガ指数判別エンジン ---
-def ultra_precision_omega_scan(text):
+# --- 1. 前走データ特化型・解析エンジン ---
+def omega_focused_parse(text):
+    # テキストを単語単位に分解
     tokens = [t.strip() for t in re.split(r'[\s\n\t]+', text) if t.strip()]
     extracted = []
     
@@ -20,38 +21,43 @@ def ultra_precision_omega_scan(text):
             b_name, b_odds, b_omega = "", 0.0, 0.0
             margins, up_ranks, times = [], [], []
             
-            # その馬番から次の馬番まで（最大60単語）を精査
+            # 馬番から次の馬番までを精密スキャン
             j = i + 1
+            is_1so_zen = False # 1走前セクションに入ったか
+            
             while j < len(tokens):
                 t = tokens[j]
-                # 次の馬番(単独の1-18)が出たら終了
                 if re.match(r'^([1-9]|1[0-8])$', t) and j > i + 5: break
                 
-                # A. 馬名の特定（騎手名・ノイズを排除）
+                # ① 馬名の特定（騎手排除フィルター）
                 if not b_name and re.match(r'^[ァ-ヶー]{2,9}$', t) and t not in NOISE:
-                    # 斤量の前にある単語は騎手名として無視
                     if j+1 < len(tokens) and re.match(r'^\d{2}\.0$', tokens[j+1]): pass
                     else: b_name = t
                 
-                # B. 数値解析：オメガ指数とオッズを分離
-                if re.match(r'^\d{1,3}\.\d$', t):
-                    val = float(t)
-                    # オメガ指数：通常70〜125。オッズより前に出現することが多い
-                    # すでにオッズ候補が入っている場合は、より「オメガらしい」方を優先
-                    if 70.0 <= val <= 135.0 and b_omega == 0.0:
-                        b_omega = val
-                    else:
-                        b_odds = val
+                # ② オッズ（通常は馬名の近くにある）
+                elif re.match(r'^\d{1,3}\.\d$', t) and b_odds == 0.0 and float(t) < 70.0:
+                    b_odds = float(t)
+
+                # ③ 【最重要】オメガ指数の抽出（1走前の付近を探す）
+                if "1走前" in t or "前走" in t:
+                    is_1so_zen = True
                 
-                # C. 着差（-0.4, +0.9など）
-                elif re.match(r'^[-+]\d\.\d$', t): margins.append(float(t))
-                # D. 上がり実績
+                if is_1so_zen:
+                    # 1走前付近で 70.0 〜 130.0 の数値があればオメガ指数と判定
+                    num_match = re.match(r'^(\d{2,3}\.\d)$', t)
+                    if num_match:
+                        val = float(num_match.group(1))
+                        if 70.0 <= val <= 135.0:
+                            b_omega = val
+                            is_1so_zen = False # 取得したらフラグ解除
+                
+                # ④ 実績数値の抽出
+                if re.match(r'^[-+]\d\.\d$', t): margins.append(float(t))
                 if any(k in t for k in ["①", "②", "③", "上1", "上2", "上3"]): up_ranks.append(1)
-                # E. タイム抽出（予想タイム算出用）
                 t_m = re.search(r'(\d)[:\.](\d{2})[\.\:](\d)', t)
                 if t_m:
-                    sec = int(t_m.group(1))*60 + int(t_m.group(2)) + int(t_m.group(3))*0.1
-                    times.append(sec)
+                    times.append(int(t_m.group(1))*60 + int(t_m.group(2)) + int(t_m.group(3))*0.1)
+                
                 j += 1
             
             if b_name and b_odds > 0:
@@ -71,31 +77,28 @@ def ultra_precision_omega_scan(text):
         df["人気"] = df.index + 1
     return df
 
-# --- 2. 予想タイム算出 ＆ 統合ロジック ---
-def apply_final_logic(df):
+# --- 2. 独自ロジック（オメガ90以上・2-5人気強化） ---
+def apply_winning_logic(df):
     if df.empty: return df
     field_best = df[df["最速タイム"] > 0]["最速タイム"].min() if not df[df["最速タイム"] > 0].empty else 100.0
 
     def calculate_score(row):
         score = 50.0
-        # ① オメガ指数評価 (90以上で特大加点)
+        # ① オメガ指数評価 (1走前の数値を重視)
         if row['オメガ'] >= 90.0: score += 45
         elif row['オメガ'] >= 80.0: score += 20
             
-        # ② 実績：0.4s / 0.9s ルール
+        # ② 実績：着差判定 (0.4s / 0.9s)
         if row['最小着差'] <= 0.4: score += 40
         elif row['最小着差'] <= 0.9: score += 15
         
-        # ③ 安定性：平均と最小の乖離
+        # ③ 上がり3F (1-3位実績)
+        if row['上り実績'] == 1: score += 20
+        
+        # ④ 安定性：平均と最小の差
         if abs(row['平均着差'] - row['最小着差']) > 1.0: score -= 20
         
-        # ④ 予想タイム評価
-        if row['最速タイム'] > 0:
-            # 簡易予想タイム：最速タイムに着差平均を少し加味
-            expected_time = row['最速タイム'] + (max(0, row['平均着差']) * 0.2)
-            if expected_time <= field_best + 0.3: score += 25
-            
-        # ⑤ 2番〜5番人気への加点 (相手強化)
+        # ⑤ 戦略：2番〜5番人気加点 (2列目・相手強化)
         if 2 <= row['人気'] <= 5: score += 30
             
         return score
@@ -104,24 +107,23 @@ def apply_final_logic(df):
     return df.sort_values("能力スコア", ascending=False).reset_index(drop=True)
 
 # --- 3. UI ---
-st.title("🏇 AI競馬：オメガ指数・数値実績解析")
+st.title("🏇 AI競馬：1走前オメガ・数値実績解析")
 
-# クリアボタン（確実にリセット）
 if st.sidebar.button("🗑️ データをクリア"):
     st.session_state.clear_key = st.session_state.get('clear_key', 0) + 1
     st.rerun()
 
-st.info("💡 競馬ラボの出馬表をコピーして貼り付けてください。オメガ90以上と2-5人気を強力に評価します。")
+st.info("💡 競馬ラボの出馬表（1走前データを含む）を貼り付けてください。オメガ90以上と2-5人気を強力評価します。")
 raw_input = st.text_area("コピペエリア", height=300, key=f"input_{st.session_state.get('clear_key', 0)}")
 
 if st.button("🚀 最新数値ロジックで分析開始"):
     if raw_input:
-        df = ultra_precision_omega_scan(raw_input)
+        df = omega_focused_parse(raw_input)
         if not df.empty:
-            df = apply_final_logic(df)
+            df = apply_winning_logic(df)
             
             st.subheader("📊 解析：能力ランキング")
-            # オメガ90以上をハイライト
+            # オメガ90以上を視覚的にハイライト
             st.dataframe(df[['馬番', '馬名', '人気', 'オッズ', 'オメガ', '最小着差', '能力スコア']].style.applymap(
                 lambda x: 'background-color: #fff3cd' if x >= 90.0 else '', subset=['オメガ']
             ))
@@ -129,17 +131,17 @@ if st.button("🚀 最新数値ロジックで分析開始"):
             col1, col2 = st.columns(2)
             h = df["馬番"].tolist()
             with col1:
-                st.subheader("AI評価印")
-                st.write(f"◎ **{df.iloc[0]['馬名']}** ({h[0]}) - 的中率最高")
+                st.subheader("AI推奨印")
+                st.write(f"◎ **{df.iloc[0]['馬名']}** ({h[0]}) - オメガ・実績上位")
                 st.write(f"○ **{df.iloc[1]['馬名']}** ({h[1]})")
                 st.write(f"▲ **{df.iloc[2]['馬名']}** ({h[2]})")
             
             with col2:
                 st.subheader("🎯 推奨：馬連買い目")
-                st.success(f"**【本線流し】** {h[0]} ― {', '.join(map(str, h[1:5]))}")
+                st.success(f"**【軸流し】** {h[0]} ― {', '.join(map(str, h[1:5]))}")
                 # 2-5番人気を確実に含むBOX
                 fav25 = df[df['人気'].between(2, 5)]['馬番'].tolist()
                 box = sorted(list(set(h[:2] + fav25[:2])))
-                st.warning(f"**【2nd列重視BOX】** {', '.join(map(str, box))}")
+                st.warning(f"**【2nd列重視：BOX】** {', '.join(map(str, box))}")
         else:
-            st.error("データを読み取れませんでした。馬名・オメガ指数が含まれているか確認してください。")
+            st.error("データを読み取れません。馬番・馬名・1走前データが含まれるようにコピーしてください。")
