@@ -6,65 +6,90 @@ import re
 import time
 import random
 
-st.set_page_config(page_title="AI競馬予想", layout="centered")
+st.set_page_config(page_title="AI競馬予想", layout="wide")
 
-def get_data_flexible(race_id):
-    url = f"https://www.keibalab.jp/db/race/{race_id}/"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
-    }
-    
+# --- 1. 最新の種牡馬ランキングをnetkeibaから取得 ---
+@st.cache_data(ttl=86400) # 1日1回だけ実行して負荷を抑える
+def get_latest_sires():
+    url = "https://db.netkeiba.com/?pid=sire_leading"
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        time.sleep(random.uniform(2, 4))
-        res = requests.get(url, headers=headers, timeout=15)
+        # サイトに負荷をかけないよう少し待機
+        time.sleep(2)
+        res = requests.get(url, headers=headers)
+        soup = BeautifulSoup(res.content, "html.parser")
+        # テーブルから馬名を抽出（上位50頭）
+        rows = soup.select(".nk_tb_common tr")[1:51]
+        return [row.find_all("td")[1].text.strip() for row in rows]
+    except:
+        return ["キズナ", "エピファネイア", "ロードカナロア"] # 失敗時のバックアップ
+
+# --- 2. 競馬ラボからレース詳細（父・母父含む）を取得 ---
+def get_detailed_data(race_id):
+    url = f"https://www.keibalab.jp/db/race/{race_id}/"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        time.sleep(2)
+        res = requests.get(url, headers=headers)
         res.encoding = res.apparent_encoding
         soup = BeautifulSoup(res.text, "html.parser")
         
-        # --- 戦略：特定のテーブルを狙わず、馬名とオッズの「並び」を直接探す ---
-        # 1. 馬名を探す（馬名リンクのパターンから抽出）
-        horse_elements = soup.find_all("a", href=re.compile(r"/db/horse/\d+/"))
-        horse_names = [h.text.strip() for h in horse_elements if h.text.strip() and len(h.text.strip()) > 1]
-        
-        # 重複を削除（血統表などのリンクも拾う可能性があるため）
-        seen = set()
-        final_names = [x for x in horse_names if not (x in seen or seen.add(x))][:18]
-        
-        # 2. オッズを探す（数字.数字 のパターンを持つクラスやテキストを探す）
-        # 競馬ラボのオッズは 'odds_tan' や 'odds' クラスに入っていることが多い
-        all_text = soup.get_text()
-        # 正規表現で「1.2」や「150.5」のようなオッズらしい数字を抽出
-        potential_odds = re.findall(r'\d+\.\d+', all_text)
-        # 出走頭数分だけ確保（上位は単勝オッズである確率が高い）
-        final_odds = potential_odds[:len(final_names)]
-
-        if final_names:
-            df = pd.DataFrame({
-                "馬名": final_names,
-                "オッズ": final_odds if len(final_odds) == len(final_names) else "取得中"
-            })
-            return df
-        return None
-    except Exception as e:
-        st.error(f"エラー詳細: {e}")
+        # 馬名、父名、オッズを抽出
+        rows = soup.select(".table_01 tr")[1:]
+        data = []
+        for row in rows:
+            tds = row.find_all("td")
+            if len(tds) > 12:
+                name = tds[3].text.strip()
+                # 血統情報は改行されて入っていることが多いので分割
+                blood = tds[4].text.strip().split('\n')
+                sire = blood[0].replace('　', '').strip()
+                bms = blood[1].replace('　', '').strip() if len(blood) > 1 else ""
+                odds = tds[12].text.strip()
+                data.append({"馬名": name, "父": sire, "母父": bms, "オッズ": odds})
+        return pd.DataFrame(data)
+    except:
         return None
 
-# --- UI ---
-st.title("🏇 AI競馬予想：データ復旧版")
+# --- メイン画面 ---
+st.title("🏇 AI競馬予想：血統・期待値モデル")
 
-# ID自動生成
-date_in = st.text_input("日付 (YYYYMMDD)", "20260207")
-place_id = st.selectbox("競馬場", ["08:京都", "05:東京", "06:中山", "09:阪神"])
-race_no = st.text_input("レース番号 (2桁)", "11")
-full_id = f"{date_in}{place_id[:2]}{race_no}"
+# 最新ランキングの準備
+top_sires = get_latest_sires()
 
-if st.button("このレースで実行"):
-    with st.spinner("データをスキャン中..."):
-        df = get_data_flexible(full_id)
+race_id = st.text_input("レースID (YYYYMMDD + 場所ID + レース)", "202602070811")
+
+if st.button("AI予想を実行"):
+    with st.spinner("最新データをスキャン中..."):
+        df = get_detailed_data(race_id)
+        
         if df is not None:
-            st.success(f"【{full_id}】 の解析に成功しました！")
-            st.table(df)
+            # 型変換
+            df["オッズ"] = pd.to_numeric(df["オッズ"], errors='coerce')
             
-            # ここにエクセルロジックを再挿入
-            st.info("💡 この馬名をベースに、種牡馬評価と前走着差を加味した『期待値』を算出します。")
+            # --- ロジック適用：AIスコアリング ---
+            def scoring(row):
+                score = 50 # 基準点
+                # 血統加点：最新TOP50にいれば+20点
+                if row['父'] in top_sires: score += 20
+                # BMS(母父)加点（簡易版）
+                if "ディープインパクト" in row['母父']: score += 10
+                return score
+
+            df["AIスコア"] = df.apply(scoring, axis=1)
+            # 期待値 = (スコア/基準) / (オッズ/平均)
+            df["期待値"] = (df["AIスコア"] / 50) * (10 / df["オッズ"])
+            
+            # 結果表示
+            st.success("分析が完了しました！")
+            res_df = df.sort_values("期待値", ascending=False)
+            
+            # スマホで見やすく表示
+            st.subheader("📊 期待値ランキング")
+            st.dataframe(res_df.style.highlight_max(subset=['期待値'], color='#ffaa00'))
+            
+            # 買い目提案
+            top3 = res_df.head(3)['馬名'].tolist()
+            st.warning(f"🎯 【推奨】 {top3[0]} を軸にした馬連・ワイド")
         else:
-            st.error("馬名が見つかりません。IDが間違っているか、サイト構造が大幅に変更された可能性があります。")
+            st.error("データが空です。IDを再確認してください。")
