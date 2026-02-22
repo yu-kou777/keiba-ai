@@ -2,64 +2,65 @@ import streamlit as st
 import pandas as pd
 import re
 
-st.set_page_config(page_title="AI競馬：最強パース版", layout="centered")
+st.set_page_config(page_title="AI競馬：スマホコピペ専用", layout="centered")
 
-st.title("🏇 AI競馬：コピペ解析エンジン")
-st.write("貼り付けられたデータから、あなたのエクセルロジックを自動適用します。")
+st.title("🏇 AI競馬：スマホコピペ解析")
+st.write("競馬ラボ等のサイトを『全選択』して、下の枠に貼り付けてください。")
 
-# --- データの超洗浄・抽出ロジック ---
-def robust_parse(text):
-    lines = text.split('\n')
-    horses = []
+def super_parse(text):
+    # 1. 改行やタブを整理
+    lines = [line.strip() for line in text.split('\n') if line.strip()]
     
-    # 1. まずは「馬名」と「オッズ」を正規表現で探す
-    # 競馬ラボのコピーデータは「馬番 馬名 ・・・ オッズ」という並びが多い
+    horses = []
+    # 2. キーワードで馬名とオッズを抽出
+    # 競馬ラボの構造： [馬番] [馬名] ... [オッズ]
     for i in range(len(lines)):
-        line = lines[i].strip()
-        
-        # パターンA: 「11 ミッキークレスト」のような馬番+馬名
-        name_match = re.search(r'^(\d{1,2})\s+([ァ-ヶー]{2,9})', line)
+        # 馬番と馬名のセットを探す (例: "11 ミッキークレスト")
+        name_match = re.match(r'^(\d{1,2})\s+([ァ-ヶー]{2,10})', lines[i])
         if name_match:
             baban = name_match.group(1)
             name = name_match.group(2)
             
-            # その馬名の周辺（前後5行以内）からオッズ（1.2のような数字）を探す
-            odds = 0.0
-            for j in range(max(0, i-2), min(len(lines), i+8)):
-                potential_odds = lines[j].strip()
-                # 純粋に「数字.数字」だけの行、または「単勝 5.5」のような形式を探す
-                odds_match = re.search(r'(\d{1,3}\.\d)$', potential_odds)
+            # その馬名の後、次の馬名が出てくるまでの間に「オッズ」があるはず
+            odds = None
+            for j in range(i + 1, min(i + 20, len(lines))):
+                # 次の馬番が出てきたら中断
+                if re.match(r'^\d{1,2}\s+[ァ-ヶー]{2,10}', lines[j]):
+                    break
+                # 「数字.数字」というオッズ形式を探す
+                odds_match = re.search(r'^(\d{1,3}\.\d)$', lines[j])
                 if odds_match:
                     odds = float(odds_match.group(1))
                     break
             
-            if odds > 0:
+            if odds:
                 horses.append({"馬番": baban, "馬名": name, "オッズ": odds})
 
-    return pd.DataFrame(horses).drop_duplicates(subset=['馬名'])
+    return pd.DataFrame(horses)
 
 # --- UI ---
-paste_data = st.text_area("ここにコピーした内容をペースト", height=300)
+paste_data = st.text_area("ここに貼り付け（長押し→ペースト）", height=400)
 
-if st.button("AI解析を実行"):
+if st.button("AI解析・予想を実行"):
     if paste_data:
-        df = robust_parse(paste_data)
+        df = super_parse(paste_data)
         
         if not df.empty:
-            st.success(f"{len(df)}頭の抽出に成功！")
+            st.success(f"解析成功！ {len(df)}頭を検出しました。")
             
-            # --- エクセルの種牡馬50ロジックの簡易適用 ---
-            # あなたがアップロードした「種牡馬50」の主要馬を判定
-            top_sires = ["キズナ", "エピファネイア", "ドゥラメンテ", "ロードカナロア"] 
-            
-            # 期待値計算
-            df["AIスコア"] = 50
-            df["期待値"] = (df["AIスコア"] / 50) * (10 / df["オッズ"])
+            # --- エクセルロジック適用 ---
+            # 期待値 = (AIスコア50 / 50) * (10 / オッズ)
+            df["期待値"] = (10 / df["オッズ"])
+            df = df.sort_values("期待値", ascending=False)
             
             st.subheader("📊 期待値ランキング")
-            st.dataframe(df.sort_values("期待値", ascending=False))
+            st.table(df) # スマホで見やすい表形式
+            
+            # 買い目
+            top3 = df.head(3)["馬番"].tolist()
+            st.warning(f"🎯 推奨BOX: {', '.join(top3)}")
         else:
-            st.error("馬のデータが抽出できません。貼り付けたテキストの最初の方に『馬番と馬名』、その後に『オッズ』が含まれているか確認してください。")
-            st.info("【ヒント】競馬ラボの『簡易出馬表』の表全体をコピーすると成功率が上がります。")
+            st.error("馬のデータが見つかりません。")
+            st.info("【コツ】馬の名前とオッズの数字が両方入るようにコピーしてください。")
     else:
-        st.warning("テキストを入力してください。")
+        st.warning("データを貼り付けてください。")
