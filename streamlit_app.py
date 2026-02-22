@@ -2,85 +2,80 @@ import streamlit as st
 import pandas as pd
 import re
 
-st.set_page_config(page_title="AI競馬：スマホコピペ完全版", layout="centered")
+st.set_page_config(page_title="AI競馬：ぐちゃぐちゃ解消版", layout="centered")
 
-st.title("🏇 AI競馬：コピペ解析エンジン")
-st.caption("エクセル不要。サイトを全選択コピーして貼り付けるだけで予想完了。")
+st.title("🏇 AI競馬：コピペ全自動解析")
+st.write("サイトを全選択コピーして、下の枠に『ペースト』するだけでOKです。")
 
-# --- 内部データベース：有力種牡馬 (エクセルの種牡馬50相当) ---
-TOP_SIRES = ["キズナ", "エピファネイア", "ロードカナロア", "ドゥラメンテ", "ハーツクライ", 
-             "モーリス", "ルーラーシップ", "ハービンジャー", "ディープインパクト", 
-             "シニスターミニスタ", "ヘニーヒューズ", "ホッコータルマエ", "ドレフォン"]
+# --- 内部ロジック：エクセルなしでも動く「種牡馬評価」 ---
+# 2026年最新の有力種牡馬リスト（ここに載っていれば加点）
+TOP_SIRES = ["キズナ", "エピファネイア", "ロードカナロア", "ドゥラメンテ", "シニスターミニスタ", 
+             "モーリス", "ハーツクライ", "ルーラーシップ", "ヘニーヒューズ", "ホッコータルマエ"]
 
-def ultra_parse(text):
+def parse_messy_text(text):
     """
-    どんなに崩れたテキストからも、馬名とオッズをペアリングする
+    ぐちゃぐちゃなテキストから、馬名・父名・オッズを吸い出す
     """
-    # 1. 馬名候補の抽出（カタカナ2〜9文字）
-    # 競馬ラボの構造上、馬名の後にオッズが来ることが多い
-    horse_candidates = re.findall(r'[ァ-ヶー]{2,9}', text)
-    # オッズ候補の抽出（数字.数字）
-    odds_candidates = re.findall(r'\d{1,3}\.\d', text)
+    # 1. まずカタカナ（馬名・父名）をすべて抜き出す
+    all_katakana = re.findall(r'[ァ-ヶー]{2,9}', text)
+    # 2. 数字（オッズ：例 5.5）をすべて抜き出す
+    all_odds = re.findall(r'\d{1,3}\.\d', text)
     
-    # 重複削除しつつ、実在しそうな馬名に絞り込む（「コース」「タイム」などのキーワードを除外）
-    keywords = ["コース", "タイム", "ウェブ", "オッズ", "ペース", "グレード", "ダート", "出馬表"]
-    valid_names = [n for n in horse_candidates if n not in keywords and len(n) >= 2]
+    # 3. 除外ワード（競馬サイトによくある「タイム」や「オッズ」という文字を消す）
+    ignore = ["オッズ", "タイム", "ペース", "グレード", "ダート", "コース", "ウェブ", "新聞"]
+    names = [n for n in all_katakana if n not in ignore]
     
-    # 2. 強引にマッピング（馬名とオッズの数が合わなくても、順番に結合）
+    # 4. 馬名とオッズをペアにする
+    # 競馬サイトは「馬名」のあとに「父名」、その少し後に「オッズ」が来る
     data = []
-    # 競馬サイトの並び順（馬名が先に出て、少し後にオッズが出る）を利用
-    min_len = min(len(valid_names), len(odds_candidates))
-    
-    # 重複を防ぎつつリスト化
-    seen = set()
-    for i in range(len(valid_names)):
-        name = valid_names[i]
-        if name in seen: continue
+    # 重複を避けて18頭分作る
+    unique_names = []
+    for n in names:
+        if n not in unique_names: unique_names.append(n)
+        if len(unique_names) >= 40: break # 多めに取っておく
+
+    # オッズと名前を順番に結合（これが一番ズレにくい）
+    for i in range(min(len(unique_names)//2, len(all_odds))):
+        horse_name = unique_names[i*2] # 1つおきに馬名と仮定
+        sire_name = unique_names[i*2 + 1] # その次を父名と仮定
+        val_odds = float(all_odds[i])
         
-        # この馬のオッズと思われるものを探索（リストの同じ位置付近から）
-        odds = 0.0
-        if i < len(odds_candidates):
-            odds = float(odds_candidates[i])
-        
-        if odds > 1.0: # オッズが1.0以上なら有効
-            data.append({"馬名": name, "オッズ": odds})
-            seen.add(name)
-            if len(data) >= 18: break # 最大頭数
+        if val_odds > 1.0:
+            data.append({"馬名": horse_name, "父": sire_name, "オッズ": val_odds})
+            if len(data) >= 18: break
 
     return pd.DataFrame(data)
 
 # --- UI ---
-st.info("💡 スマホで競馬ラボの『簡易出馬表』を全選択コピーして、下の枠に貼り付けてください。")
-raw_text = st.text_area("コピペエリア（ここにペースト）", height=300)
+st.info("💡 競馬ラボの『簡易出馬表』を全選択コピーして、下に貼り付けてください。")
+raw_input = st.text_area("ここにペースト", height=300)
 
 if st.button("AI解析・予想スタート"):
-    if raw_text:
-        df = ultra_parse(raw_text)
+    if raw_input:
+        df = parse_messy_text(raw_input)
         
         if not df.empty:
-            # --- AIスコアリングロジック (エクセルなし版) ---
-            def get_score(row):
+            # --- AIスコアリング（期待値ロジック） ---
+            def scoring(row):
                 score = 50
-                # 血統評価（仮：本来は父馬名が必要だが、馬名から推測するか、
-                # コピペデータから『父』を抽出する精度を高める必要があります。
-                # 現状はオッズと馬名のみで期待値を算出します）
+                if any(s in row['父'] for s in TOP_SIRES): score += 20 # 血統加点
                 return score
 
-            df["期待値"] = (50 / 50) * (15 / df["オッズ"])
+            df["AIスコア"] = df.apply(scoring, axis=1)
+            # 期待値 = (スコア/基準) / オッズ
+            df["期待値"] = (df["AIスコア"] / 50) * (15 / df["オッズ"])
+            
+            st.success(f"解析成功：{len(df)}頭を検出")
             res_df = df.sort_values("期待値", ascending=False)
             
-            st.success(f"{len(df)}頭を検出！")
             st.subheader("📊 期待値ランキング")
-            st.table(res_df.head(10)) # スマホで見やすい表
+            st.table(res_df[['馬名', '父', 'オッズ', '期待値']].head(10))
             
-            # 推奨買い目
             st.divider()
             st.subheader("🎯 推奨買い目")
-            top_names = res_df.head(3)["馬名"].tolist()
-            st.write(f"**本命◎**: {top_names[0]}")
-            st.write(f"**相手○**: {top_names[1]}")
-            st.write(f"**相手▲**: {top_names[2]}")
+            top_3 = res_df.head(3)["馬名"].tolist()
+            st.warning(f"◎ {top_3[0]}  /  ○ {top_3[1]}  /  ▲ {top_3[2]}")
         else:
-            st.error("データを読み取れませんでした。コピーする範囲を広げてみてください。")
+            st.error("うまく読み取れませんでした。コピーする範囲を広げてみてください。")
     else:
         st.warning("データを入力してください。")
