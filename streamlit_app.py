@@ -2,84 +2,69 @@ import streamlit as st
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
+import re
 import time
 import random
 
-# --- 対策①: ヘッダーをさらに詳細化 (iPhone 15プロ仕様) ---
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "ja-jp",
-    "Connection": "keep-alive",
-}
+st.set_page_config(page_title="AI競馬予想", layout="centered")
 
-# --- 対策②: @st.cache_data を使って「同じデータは二度取らない」 ---
-@st.cache_data(ttl=3600) # 1時間はネットを見に行かずキャッシュを使う
-def get_html_safe(url):
-    time.sleep(random.uniform(2.0, 5.0)) # 人間が画面を眺める時間を偽装
+def get_data_flexible(race_id):
+    url = f"https://www.keibalab.jp/db/race/{race_id}/"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+    }
+    
     try:
-        response = requests.get(url, headers=HEADERS, timeout=15)
-        if response.status_code == 200:
-            response.encoding = response.apparent_encoding
-            return response.text
-        else:
-            st.error(f"サイトが混み合っています (Status: {response.status_code})")
-            return None
+        time.sleep(random.uniform(2, 4))
+        res = requests.get(url, headers=headers, timeout=15)
+        res.encoding = res.apparent_encoding
+        soup = BeautifulSoup(res.text, "html.parser")
+        
+        # --- 戦略：特定のテーブルを狙わず、馬名とオッズの「並び」を直接探す ---
+        # 1. 馬名を探す（馬名リンクのパターンから抽出）
+        horse_elements = soup.find_all("a", href=re.compile(r"/db/horse/\d+/"))
+        horse_names = [h.text.strip() for h in horse_elements if h.text.strip() and len(h.text.strip()) > 1]
+        
+        # 重複を削除（血統表などのリンクも拾う可能性があるため）
+        seen = set()
+        final_names = [x for x in horse_names if not (x in seen or seen.add(x))][:18]
+        
+        # 2. オッズを探す（数字.数字 のパターンを持つクラスやテキストを探す）
+        # 競馬ラボのオッズは 'odds_tan' や 'odds' クラスに入っていることが多い
+        all_text = soup.get_text()
+        # 正規表現で「1.2」や「150.5」のようなオッズらしい数字を抽出
+        potential_odds = re.findall(r'\d+\.\d+', all_text)
+        # 出走頭数分だけ確保（上位は単勝オッズである確率が高い）
+        final_odds = potential_odds[:len(final_names)]
+
+        if final_names:
+            df = pd.DataFrame({
+                "馬名": final_names,
+                "オッズ": final_odds if len(final_odds) == len(final_names) else "取得中"
+            })
+            return df
+        return None
     except Exception as e:
-        st.error(f"接続エラー: {e}")
+        st.error(f"エラー詳細: {e}")
         return None
 
-# --- 対策③: 種牡馬データが取れない時のための「固定リスト」 ---
-# これにより、サイトが落ちていてもアプリが動かなくなるのを防ぎます
-DEFAULT_SIRES = ["キズナ", "ロードカナロア", "エピファネイア", "ドゥラメンテ", "モーリス", "ハーツクライ", "ディープインパクト"]
+# --- UI ---
+st.title("🏇 AI競馬予想：データ復旧版")
 
-@st.cache_data
-def get_sire_rankings():
-    url = "https://db.netkeiba.com/?pid=sire_leading"
-    html = get_html_safe(url)
-    if not html: return DEFAULT_SIRES
-    
-    soup = BeautifulSoup(html, "html.parser")
-    rows = soup.select(".nk_tb_common tr")
-    sires = [row.find_all("td")[1].text.strip() for row in rows[1:51] if len(row.find_all("td")) > 1]
-    return sires if sires else DEFAULT_SIRES
+# ID自動生成
+date_in = st.text_input("日付 (YYYYMMDD)", "20260207")
+place_id = st.selectbox("競馬場", ["08:京都", "05:東京", "06:中山", "09:阪神"])
+race_no = st.text_input("レース番号 (2桁)", "11")
+full_id = f"{date_in}{place_id[:2]}{race_no}"
 
-# --- メインロジック ---
-st.title("🏇 鉄壁版・AI競馬予想")
-
-with st.sidebar:
-    st.write("📡 接続ステータス: 正常")
-    if st.button("キャッシュをクリア"):
-        st.cache_data.clear()
-        st.success("再取得の準備ができました")
-
-# ID入力部分
-race_id = st.text_input("レースID", "202602070811")
-
-if st.button("慎重に分析を開始"):
-    with st.spinner("サイトに負荷をかけないよう、ゆっくり解析しています..."):
-        # 種牡馬取得
-        top_sires = get_sire_rankings()
-        
-        # レースデータ取得
-        url_lab = f"https://www.keibalab.jp/db/race/{race_id}/"
-        html_lab = get_html_safe(url_lab)
-        
-        if html_lab:
-            soup = BeautifulSoup(html_lab, "html.parser")
-            # 馬名と父名を抜く（正規表現を使わず確実にタグで指定）
-            rows = soup.select(".table_01 tr")[1:]
-            results = []
-            for row in rows:
-                tds = row.find_all("td")
-                if len(tds) > 12:
-                    name = tds[3].text.strip()
-                    sire = tds[4].text.split('\n')[0].strip()
-                    odds = tds[12].text.strip()
-                    results.append({"馬名": name, "父": sire, "オッズ": odds})
+if st.button("このレースで実行"):
+    with st.spinner("データをスキャン中..."):
+        df = get_data_flexible(full_id)
+        if df is not None:
+            st.success(f"【{full_id}】 の解析に成功しました！")
+            st.table(df)
             
-            df = pd.DataFrame(results)
-            st.success("データの取得に成功しました！")
-            st.dataframe(df)
+            # ここにエクセルロジックを再挿入
+            st.info("💡 この馬名をベースに、種牡馬評価と前走着差を加味した『期待値』を算出します。")
         else:
-            st.warning("現在はサイト側で制限がかかっています。15分ほど空けてからお試しください。")
+            st.error("馬名が見つかりません。IDが間違っているか、サイト構造が大幅に変更された可能性があります。")
