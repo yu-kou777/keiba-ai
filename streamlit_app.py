@@ -4,77 +4,76 @@ import requests
 from bs4 import BeautifulSoup
 import re
 
-st.set_page_config(page_title="AI競馬予想", layout="centered")
+st.set_page_config(page_title="AI競馬予想・分析", layout="centered")
 
-def get_keibalab_data_robust(race_id):
+# --- ロジック：スコアリング設定 ---
+# あなたのエクセル（種牡馬50など）の傾向を反映
+TOP_SIRES = ["キズナ", "ロードカナロア", "エピファネイア", "ドゥラメンテ"] # 例
+
+def calculate_ai_score(row):
     """
-    構造が変わっても抜きやすいよう、正規表現とタグ検索を組み合わせた修正版
+    エクセルのロジックをPythonで再現
+    """
+    score = 50 # 基準点
+    
+    # 1. オッズによる期待値補正
+    if row['オッズ'] > 3.0 and row['オッズ'] < 15.0:
+        score += 10 # 割安ゾーン
+    
+    # 2. 血統評価（仮の実装）
+    # 実際にはCSVから読み込んだリストと照合します
+    for sire in TOP_SIRES:
+        if sire in str(row['馬名']): # 簡易的に名前で判定（本番は血統データと照合）
+            score += 15
+            
+    return score
+
+def get_full_analysis(race_id):
+    """
+    競馬ラボからデータを抜き、独自ロジックで評価する
     """
     url = f"https://www.keibalab.jp/db/race/{race_id}/"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-    }
+    headers = {"User-Agent": "Mozilla/5.0"}
     
     try:
         res = requests.get(url, headers=headers)
         res.encoding = res.apparent_encoding
         soup = BeautifulSoup(res.text, "html.parser")
         
-        # 馬名が入っているリンク（/db/horse/数字/）をすべて探す
+        # 馬名とオッズの抽出
         horse_links = soup.find_all("a", href=re.compile(r"/db/horse/\d+/"))
-        
-        # 重複を除去しながら馬名リストを作成
-        horse_names = []
-        for link in horse_links:
-            name = link.text.strip()
-            if name and name not in horse_names:
-                horse_names.append(name)
-        
-        # オッズを探す（"odds_tan" というクラス名が使われていることが多い）
         odds_elements = soup.select(".odds_tan, .odds")
-        odds_list = [opt.text.strip() for opt in odds_elements if opt.text.strip()]
-
-        # 最小限のデータを組み立てる
-        if not horse_names:
-            return None
-
-        # 取得できた分だけでデータフレームを作成
-        df = pd.DataFrame({"馬名": horse_names})
-        # オッズが取得できていれば結合、できていなければ「調査中」とする
-        if len(odds_list) >= len(horse_names):
-            df["オッズ"] = odds_list[:len(horse_names)]
-        else:
-            df["オッズ"] = "確認中"
-            
-        return df
-
-    except Exception as e:
-        st.error(f"接続エラー: {e}")
+        
+        names = [link.text.strip() for link in horse_links if link.text.strip()][:16]
+        odds = [opt.text.strip() for opt in odds_elements if opt.text.strip()][:16]
+        
+        df = pd.DataFrame({"馬名": names, "オッズ": odds})
+        df["オッズ"] = pd.to_numeric(df["オッズ"], errors='coerce')
+        
+        # --- 最新ロジック適用 ---
+        df["AIスコア"] = df.apply(calculate_ai_score, axis=1)
+        # 期待値 = (AIスコア / 基準点) / オッズ ※簡易式
+        df["期待値"] = (df["AIスコア"] / 50) * (10 / df["オッズ"]) # 独自ロジック
+        
+        return df.sort_values("期待値", ascending=False)
+    except:
         return None
 
-# --- メイン画面 ---
-st.title("🏇 AI競馬予想システム")
+# --- UI部分 ---
+st.title("🏇 AI競馬予想：ロジック統合版")
 
-# 日付やレース番号からIDを自動生成する補助機能
-with st.expander("設定（レースID生成）"):
-    st.write("2026年2月7日 京都11R の場合： 202602070811")
-    input_date = st.text_input("日付 (YYYYMMDD)", "20260207")
-    input_place = st.selectbox("場所ID", ["05:東京", "06:中山", "08:京都", "09:阪神"], index=2)
-    input_race = st.text_input("レース番号 (2桁)", "11")
-    auto_id = f"{input_date}{input_place[:2]}{input_race}"
+race_id = st.text_input("レースID (例: 202602070811)", "202602070811")
 
-race_id = st.text_input("実行するレースID", value=auto_id)
-
-if st.button("予想を実行"):
-    with st.spinner("最新データを解析中..."):
-        df = get_keibalab_data_robust(race_id)
+if st.button("AI予想を実行"):
+    df_result = get_full_analysis(race_id)
+    if df_result is not None:
+        st.success("分析完了！")
         
-        if df is not None:
-            st.success(f"【{race_id}】 のデータを取得しました！")
-            
-            # --- ここにエクセルで行っていたロジックを反映 ---
-            # 例: アップロードされた「種牡馬50」などの基準をここに数式として入れる
-            st.subheader("📊 予想リスト（期待値順）")
-            st.table(df) # まずはリストが出るか確認
-        else:
-            st.error("サイトからデータを取得できませんでした。IDが正しいか、またはサイトが混み合っている可能性があります。")
+        # 的中率管理のイメージ
+        st.subheader("🎯 推奨買い目（期待値順）")
+        st.dataframe(df_result[['馬名', 'オッズ', 'AIスコア', '期待値']].style.highlight_max(axis=0, subset=['期待値']))
+        
+        # 券種別アドバイス
+        st.info("💡 馬連：上位3頭ボックス / 3連単：上位頭を1軸に設定")
+    else:
+        st.error("データの取得に失敗しました。")
