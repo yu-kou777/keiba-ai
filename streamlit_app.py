@@ -1,119 +1,134 @@
 import streamlit as st
 import pandas as pd
 import re
+import numpy as np
 
-st.set_page_config(page_title="AI競馬：1番人気・完全防衛モデル", layout="wide")
+st.set_page_config(page_title="AI競馬：実績・時計解析モデル", layout="wide")
 
-# --- 1. 内部データ：不変の種牡馬データ（種牡馬50/BMS50） ---
-TOP_BLOOD_LIST = ["キズナ", "ドゥラメンテ", "エピファネイア", "ロードカナロア", "モーリス", "ハーツクライ", "ルーラーシップ", "ディープインパクト", "キングカメハメハ"]
-
-# --- 2. 解析エンジン（数値データ抽出） ---
-def scan_race_data(text):
+# --- 1. 解析エンジン（過去走・タイム・上り抽出） ---
+def deep_scan_data(text):
     lines = [l.strip() for l in text.split('\n') if l.strip()]
     extracted = []
-    race_info = "レース未特定"
     
-    for line in lines:
-        if "R" in line and len(line) < 30:
-            race_info = line
-            break
-
+    # 馬番(1-18)をアンカーに、深いデータを抽出
     for i in range(len(lines)):
         if re.match(r'^([1-9]|1[0-8])$', lines[i]):
             b_no = lines[i]
-            b_name, b_sire, b_odds, b_margin = "", "", 0.0, 9.9
+            b_name, b_odds = "", 0.0
+            last_3f_rank = 5  # デフォルト
+            margins = []      # 近3走の着差
+            best_time = 999.0 # 近5走の同距離最速
             
-            for j in range(i + 1, min(i + 20, len(lines))):
+            # その馬番から30行以内を深くスキャン
+            for j in range(i + 1, min(i + 40, len(lines))):
                 l = lines[j]
+                # 馬名
                 if not b_name and re.match(r'^[ァ-ヶー]{2,9}$', l): b_name = l
-                elif b_name and not b_sire and re.match(r'^[ァ-ヶー]{2,10}$', l) and l != b_name:
-                    b_sire = l
+                # オッズ
                 elif re.match(r'^\d{1,3}\.\d$', l): b_odds = float(l)
-                elif re.search(r'([-+]\d\.\d)', l):
-                    b_margin = float(re.search(r'([-+]\d\.\d)', l).group(1))
-                    break
+                
+                # 上り3F順位の抽出 (例: ①, ②, ③ または 上り1位など)
+                if any(k in l for k in ["①", "上り1", "上り2", "上り3"]): last_3f_rank = 1
+                
+                # 着差の抽出 (例: -0.4, 0.8)
+                margin_match = re.findall(r'([-+]\d\.\d)', l)
+                if margin_match: margins.extend([float(m) for m in margin_match])
+                
+                # 走破タイムの抽出 (例: 1:23.4 や 1.23.4)
+                time_match = re.search(r'(\d)[:\.](\d{2})[\.\:](\d)', l)
+                if time_match:
+                    seconds = int(time_match.group(1))*60 + int(time_match.group(2)) + int(time_match.group(3))*0.1
+                    if seconds < best_time: best_time = seconds
 
             if b_name and b_odds > 0:
+                # 近3走着差の平均（ギャップ評価用）
+                avg_margin = sum(margins[:3])/len(margins[:3]) if margins else 1.0
+                # 0.4s以内、0.9s以内の判定
+                recent_performance = min(margins) if margins else 1.0
+                
                 extracted.append({
-                    "馬番": b_no, "馬名": b_name, "父": b_sire, 
-                    "オッズ": b_odds, "前走着差": b_margin
+                    "馬番": b_no, "馬名": b_name, "オッズ": b_odds,
+                    "上り評価": last_3f_rank, "近走最小着差": recent_performance,
+                    "平均着差": avg_margin, "最速タイム": best_time
                 })
-    return race_info, pd.DataFrame(extracted).drop_duplicates(subset=['馬番'])
-
-# --- 3. 1番人気防衛・連対特化ロジック ---
-def apply_winning_logic(df):
-    def score_calculation(row):
-        # 基礎能力値
-        power = 50.0
-        
-        # ① 1番人気・上位人気ボーナス（ここを大幅強化）
-        if row['オッズ'] <= 2.9:
-            power += 60  # 圧倒的1番人気への信頼
-        elif row['オッズ'] <= 4.9:
-            power += 40  # 上位人気への信頼
-            
-        # ② 0.4秒ルール（実績の裏付け）
-        if row['前走着差'] <= 0.0:
-            power += 35  # 前走勝利馬（1番人気に多いパターン）
-        elif row['前走着差'] <= 0.4:
-            power += 20  # 惜敗馬
-        
-        # ③ 血統評価
-        if any(s in str(row['父']) for s in TOP_BLOOD_LIST):
-            power += 15
-            
-        return power
-
-    df["能力スコア"] = df.apply(score_calculation, axis=1)
-    # 期待値も計算はするが、ランキングには「能力スコア」を使用
-    df["期待値"] = (df["能力スコア"] / 50) * (10 / row['オッズ'] if 'row' in locals() else 1) # 安全策
     
-    # 能力スコア（的中確率）でソート
-    return df.sort_values("能力スコア", ascending=False).reset_index(drop=True)
+    return pd.DataFrame(extracted).drop_duplicates(subset=['馬番'])
 
-# --- 4. UI構築 ---
-st.title("🏇 AI競馬：1番人気・完全防衛エンジン")
+# --- 2. 独自の数値評価ロジック（実績・時計・ギャップ） ---
+def apply_deep_logic(df):
+    if df.empty: return df
+    
+    # 全体の最速タイムとの差（偏差）
+    min_time_in_field = df["最速タイム"].min()
+    
+    def score_calculation(row):
+        score = 50.0
+        
+        # ① 上り3Fランク評価 (1-3位なら大幅加点)
+        if row['上り評価'] == 1: score += 25
+        
+        # ② 着差ランク付け（0.4秒以内 / 0.9秒以内）
+        if row['近走最小着差'] <= 0.4: score += 35
+        elif row['近走最小着差'] <= 0.9: score += 15
+        
+        # ③ 過去3走のギャップ（安定性）評価
+        # 平均着差と最小着差の乖離が大きい＝ムラ馬として警戒（減点）
+        if abs(row['平均着差'] - row['近走最小着差']) > 1.0: score -= 15
+        
+        # ④ 近5走・同距離最速タイム評価
+        if row['最速タイム'] < 999:
+            time_gap = row['最速タイム'] - min_time_in_field
+            if time_gap <= 0.2: score += 20 # メンバー最速クラス
+            elif time_gap <= 0.5: score += 10
+            
+        return score
 
-if "clear_key" not in st.session_state:
-    st.session_state.clear_key = 0
+    df["実績スコア"] = df.apply(score_calculation, axis=1)
+    # 期待値計算
+    df["期待値"] = (df["実績スコア"] / 50) * (10 / df["オッズ"])
+    return df.sort_values("実績スコア", ascending=False).reset_index(drop=True)
 
+# --- 3. UI構築 ---
+st.title("🏇 AI競馬：実績・時計ディープ解析エンジン")
+st.caption("過去走の着差・上り・持ち時計のみを抽出。主観を廃した実数値予想。")
+
+if "clear_key" not in st.session_state: st.session_state.clear_key = 0
 if st.sidebar.button("🗑️ データをクリア"):
     st.session_state.clear_key += 1
     st.rerun()
 
-st.info("💡 1番人気を軸に、精度の高い馬連予想を提供します。コピペして実行してください。")
+st.info("💡 競馬ラボの『ウェブ新聞』または『簡易出馬表』を全選択コピーして貼り付けてください。")
 raw_input = st.text_area("コピペエリア", height=300, key=f"input_{st.session_state.clear_key}")
 
-if st.button("🚀 的中重視で予想実行"):
+if st.button("🚀 ディープ解析・予想実行"):
     if raw_input:
-        r_name, df = scan_race_data(raw_input)
+        df = deep_scan_data(raw_input)
         if not df.empty:
-            df = apply_winning_logic(df)
-            
-            st.subheader(f"📅 解析：{r_name}")
+            df = apply_deep_logic(df)
             
             col1, col2 = st.columns([1.5, 1])
             with col1:
-                st.subheader("📊 能力ランキング（的中確率順）")
-                # 1番人気を強調
-                st.dataframe(df[['馬番', '馬名', 'オッズ', '前走着差', '能力スコア']].head(10).style.highlight_min(subset=['オッズ'], color='#fff3cd'))
+                st.subheader("📊 実績・能力ランキング")
+                st.dataframe(df[['馬番', '馬名', 'オッズ', '近走最小着差', '実績スコア']].head(10))
             
             with col2:
-                st.subheader("AI評価印（馬連軸）")
+                st.subheader("AI推奨印")
                 h = df["馬番"].tolist()
-                st.write(f"◎ **{df.iloc[0]['馬名']}** ({h[0]}) - 鉄板軸候補")
+                st.write(f"◎ **{df.iloc[0]['馬名']}** ({h[0]}) - 実績No.1")
                 st.write(f"○ **{df.iloc[1]['馬名']}** ({h[1]})")
                 st.write(f"▲ **{df.iloc[2]['馬名']}** ({h[2]})")
-                st.write(f"△ **{df.iloc[3]['馬名']}** ({h[3]})")
 
             st.divider()
-            st.subheader("🎯 馬連・推奨買い目")
+            st.subheader("🎯 馬連推奨買い目（数値裏付け）")
             c1, c2 = st.columns(2)
             with c1:
-                st.success(f"**【堅実：軸1頭流し】**\n\n**{h[0]}** ― {h[1]}, {h[2]}, {h[3]}, {h[4]} (4点)")
-                st.caption("1番人気（または能力1位）から、0.4s以内の有力馬へ。")
+                st.success(f"**【本線流し】** {h[0]} ― {h[1]}, {h[2]}, {h[3]}, {h[4]}")
             with c2:
-                st.warning(f"**【的中：フォーメーション】**\n\n**1頭目：{h[0]}, {h[1]}**\n**2頭目：{h[0]}, {h[1]}, {h[2]}, {h[3]}**\n(計5点)")
-                st.caption("上位2頭を軸に、2着漏れを徹底的に防ぐ買い目。")
+                # 持ち時計が速い穴馬をピックアップ
+                fast_holes = df[(df['オッズ'] >= 10.0) & (df['実績スコア'] >= 60)].head(2)
+                if not fast_holes.empty:
+                    st.warning(f"**【時計注意：穴馬】** {', '.join(fast_holes['馬番'].tolist())}")
+                else:
+                    st.warning(f"**【堅実BOX】** {h[0]}, {h[1]}, {h[2]}, {h[3]}")
         else:
-            st.error("データの抽出に失敗しました。")
+            st.error("データを抽出できませんでした。過去走の着差やタイムが含まれるようにコピーしてください。")
