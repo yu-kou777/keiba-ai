@@ -2,42 +2,48 @@ import streamlit as st
 import pandas as pd
 import re
 
-st.set_page_config(page_title="AI競馬：最終実績・数値解析", layout="wide")
+st.set_page_config(page_title="AI競馬：騎手排除・数値解析", layout="wide")
 
-# --- 1. 究極・データ解析エンジン（読み込みエラー完全対策） ---
-def ultimate_scan(text):
-    # テキストを徹底的にクリーニング
+# --- 1. 騎手排除・超精密スキャンエンジン ---
+def robust_horse_scan(text):
+    # テキストを単語単位に分解
     tokens = [t.strip() for t in re.split(r'[\s\n\t]+', text) if t.strip()]
     extracted = []
     
-    # 競馬特有のノイズ単語（これらを馬名から除外）
-    NOISE = ["オッズ", "タイム", "上がり", "推定", "指数", "良", "重", "稍", "不", "芝", "ダ", "コース", "確定", "簡易"]
-
+    # 競馬用語・ノイズ・騎手名の特徴を除外
+    # 騎手名によくつく記号や、明らかに馬名でないワード
+    NOISE = ["オッズ", "タイム", "上がり", "推定", "指数", "良", "重", "稍", "不", "芝", "ダ", "確定", "斤量"]
+    
     i = 0
     while i < len(tokens):
-        # 馬番(1-18)を探す
+        # 1. 馬番(1-18)を探す
         if re.match(r'^([1-9]|1[0-8])$', tokens[i]):
             b_no = int(tokens[i])
             b_name, b_odds = "", 0.0
             margins, up_ranks, times = [], [], []
             
-            # その馬番から次の馬番までの範囲（最大50語）を精査
+            # 馬番から次の馬番までの範囲をスキャン
             j = i + 1
             while j < len(tokens):
                 t = tokens[j]
-                # 次の馬番(単独の1-18)が出たら終了
+                # 次の馬番が出たら終了
                 if re.match(r'^([1-9]|1[0-8])$', t) and j > i + 5: break
                 
-                # ① 馬名の抽出（カタカナ2-9文字でノイズでないもの）
+                # A. 馬名の特定（2〜9文字のカタカナ、かつNOISEでない、かつ記号を含まない）
                 if not b_name and re.match(r'^[ァ-ヶー]{2,9}$', t) and t not in NOISE:
-                    b_name = t
-                # ② オッズ
+                    # 騎手名判定：次のトークンが「54.0」などの斤量なら、その単語は騎手である可能性が高いのでスキップ
+                    if j+1 < len(tokens) and re.match(r'^\d{2}\.0$', tokens[j+1]):
+                        pass 
+                    else:
+                        b_name = t
+                
+                # B. オッズ
                 elif re.match(r'^\d{1,3}\.\d$', t): b_odds = float(t)
-                # ③ 着差
+                # C. 着差
                 elif re.match(r'^[-+]\d\.\d$', t): margins.append(float(t))
-                # ④ 上がり
+                # D. 上がり
                 if any(k in t for k in ["①", "②", "③", "上1", "上2", "上3"]): up_ranks.append(1)
-                # ⑤ タイム
+                # E. タイム
                 t_m = re.search(r'(\d)[:\.](\d{2})[\.\:](\d)', t)
                 if t_m: times.append(int(t_m.group(1))*60 + int(t_m.group(2)) + int(t_m.group(3))*0.1)
                 
@@ -60,8 +66,8 @@ def ultimate_scan(text):
         df["人気"] = df.index + 1
     return df
 
-# --- 2. 徹底数値ロジック ---
-def apply_final_logic(df):
+# --- 2. 数値ロジック（実績 + 2-5番人気強化） ---
+def apply_logic(df):
     if df.empty: return df
     field_best = df[df["最速タイム"] < 900]["最速タイム"].min() if not df[df["最速タイム"] < 900].empty else 99.0
 
@@ -72,6 +78,7 @@ def apply_final_logic(df):
         elif row['最小着差'] <= 0.9: score += 15
         if abs(row['平均着差'] - row['最小着差']) > 1.0: score -= 20
         if row['最速タイム'] < 900 and (row['最速タイム'] - field_best) <= 0.3: score += 20
+        # 2番〜5番人気の評価を底上げ（相手強化）
         if 2 <= row['人気'] <= 5: score += 30
         return score
 
@@ -79,27 +86,28 @@ def apply_final_logic(df):
     return df.sort_values("能力スコア", ascending=False).reset_index(drop=True)
 
 # --- 3. UI ---
-st.title("🏇 AI競馬：最終実績数値・完全解析")
+st.title("🏇 AI競馬：実績数値解析（騎手排除モデル）")
 
 if st.sidebar.button("🗑️ データをクリア"):
     st.session_state.clear_key = st.session_state.get('clear_key', 0) + 1
     st.rerun()
 
-st.info("💡 競馬ラボの『ウェブ新聞』等をすべて選択コピーして貼り付けてください。実績のみで解析します。")
+st.info("💡 競馬ラボの『ウェブ新聞』等をコピーして貼り付けてください。馬名と騎手を厳格に分離します。")
 raw_input = st.text_area("コピペエリア", height=300, key=f"input_{st.session_state.get('clear_key', 0)}")
 
-if st.button("🚀 最新ロジックで分析開始"):
+if st.button("🚀 最新実績ロジックで分析開始"):
     if raw_input:
-        df = ultimate_scan(raw_input)
+        df = robust_horse_scan(raw_input)
         if not df.empty:
-            df = apply_final_logic(df)
+            df = apply_logic(df)
             
-            st.subheader("📊 能力ランキング（的中期待度順）")
+            st.subheader("📊 実績ランキング（的中期待度順）")
             st.dataframe(df[['馬番', '馬名', '人気', 'オッズ', '最小着差', '能力スコア']])
             
             h = df["馬番"].tolist()
             st.success(f"**【推奨：馬連流し】** {h[0]} ― {', '.join(map(str, h[1:5]))}")
             fav25 = df[df['人気'].between(2, 5)]['馬番'].tolist()
-            st.warning(f"**【推奨：2-5人気BOX】** {', '.join(map(str, sorted(list(set(h[:2] + fav25[:2])))))}")
+            st.warning(f"**【推奨：2nd列重視BOX】** {', '.join(map(str, sorted(list(set(h[:2] + fav25[:2])))))}")
         else:
-            st.error("読み取れません。馬番・馬名・オッズが含まれるようにコピーしてください。")
+            st.error("データを読み取れません。馬番・馬名・オッズが含まれるようにコピーしてください。")
+
